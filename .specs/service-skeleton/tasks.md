@@ -1,6 +1,6 @@
 # Pricing Service Skeleton Implementation Tasks
 
-Status: Ready for implementation.
+Status: Implemented; Price Creation T2 tracks a later regression in container-smoke setup.
 
 ## 1. Delivery rules
 
@@ -9,13 +9,16 @@ Status: Ready for implementation.
 - The final acceptance task runs the project-mandated `mvn -B -ntp clean verify` lifecycle.
 - Specification gaps are corrected in `requirements.md` or `design.md` before code changes.
 - No task uses test, formatting, migration, or compilation skip flags.
+- Creation-specific implementation and regression evidence are owned by
+  [Price Creation tasks](../price-creation/tasks.md); this task map references that feature only
+  where the shared build, OpenAPI document, README, or container smoke test aggregates it.
 
 ## 2. Dependency graph
 
 ```mermaid
 flowchart TD
     T1["T1 Maven foundation"] --> T2["T2 Persistence"]
-    T2 --> T3["T3 Create and retrieve"]
+    T2 --> T3["T3 Retrieve"]
     T3 --> T4["T4 Browse"]
     T4 --> T5["T5 Replace and delete"]
     T5 --> T6["T6 Errors and architecture"]
@@ -64,7 +67,7 @@ The intentionally linear graph keeps every task boundary executable and covered.
 
 **Depends on:** T1.
 
-**Refs.** `requirements.md` AC1.2, AC4.2, AC8.1-AC8.6, and AC11.2-AC11.3;
+**Refs.** `requirements.md` AC4.2, AC8.1-AC8.6, and AC11.2-AC11.3;
 `design.md` §4.1-§4.4, §5.1-§5.2, §8.1, §8.3, §11.1-§11.2, and §12.
 
 **Scope.**
@@ -91,38 +94,35 @@ The intentionally linear graph keeps every task boundary executable and covered.
 - No schema-generation script/mode or migration creates the shared database, role, or schema.
 - `mvn -B -ntp clean verify` succeeds with no-context domain tests and real-PostgreSQL migration tests.
 
-### T3 - Deliver create and retrieve
+### T3 - Deliver retrieval
 
-**Commit:** `feat: create and retrieve pricing`
+**Commit:** `feat: retrieve pricing`
 
 **Depends on:** T2.
 
-**Refs.** `requirements.md` AC1.1-AC1.4, AC2.1-AC2.2, AC6.1-AC6.3,
-AC11.2-AC11.4, and AC12.1; `design.md` §2.1-§2.3, §3.1-§3.2, §4.3-§4.4,
-§5.1-§5.3, §6.1-§6.3, and §11.1-§11.2.
+**Refs.** `requirements.md` AC2.1-AC2.2, AC6.1-AC6.3, AC11.2-AC11.4, and
+AC12.1; `design.md` §2.1-§2.3, §3.2, §4.3, §5.1-§5.3, §6.1-§6.3, and
+§11.1-§11.2.
 
 **Scope.**
 
-- Add `PricingDTO`, converter, transactional service, domain exceptions, and controller mappings
-  for `POST` and item `GET`.
-- Add problem/violation DTOs and handler behavior needed for validation, duplicate, malformed, and
-  not-found outcomes.
-- Add DTO, converter, and service unit tests plus full-stack create/retrieve/conflict tests.
+- Add `PricingDTO`, converter, transactional retrieval service, domain exception, and item
+  `GET` controller mapping.
+- Add problem/violation DTOs and handler behavior needed for path validation and not-found
+  outcomes.
+- Add DTO, converter, and service unit tests plus full-stack retrieval and not-found tests.
 
 **DoD.**
 
-- `PricingDTOTest`, `PricingConverterTest`, and `PricingServiceTest` use no Spring context; Mockito
-  collaborators prove repository interactions and non-interaction on rejected paths.
-- Valid unauthenticated `POST /api/v1/pricing` returns `201`, all six exact business values, a
-  resource `Location`, and a row under the case-sensitive supplied serial.
-- Item `GET` returns `200`; missing item returns `404`; invalid path syntax returns `400`; and
-  `DRILL-001` and `drill-001` remain distinct.
-- Missing, null, boundary-violating, over-precision, over-scale, unknown-property, wrong-type, and
-  malformed create bodies return `400` and leave the table unchanged.
-- Sequential and concurrent duplicates return the stable `409` for the loser, retain the original
-  row, and expose no SQL or constraint detail.
-- Every slice error is `application/problem+json`; validation errors carry sorted violations.
-- `mvn -B -ntp clean verify` succeeds with unit and PostgreSQL full-stack tests.
+- `PricingDTOTest`, `PricingConverterTest`, and `PricingServiceTest` use no Spring context;
+  Mockito collaborators prove retrieval repository interactions and non-interaction after a
+  missing result.
+- Item `GET` returns `200` with all six values; missing item returns `404`; invalid path
+  syntax returns `400`; and `DRILL-001` and `drill-001` remain distinct.
+- Every retrieval error is `application/problem+json`; path validation errors carry sorted
+  violations and not-found responses expose no repository detail.
+- `mvn -B -ntp clean verify` succeeds with unit and PostgreSQL full-stack tests. Creation
+  coverage is independently required by Price Creation tasks T1.
 
 ### T4 - Deliver bounded pricing browsing
 
@@ -186,7 +186,7 @@ and §12.
 
 **Depends on:** T5.
 
-**Refs.** `requirements.md` AC1.4, AC3.4, AC4.3-AC4.5, AC6.1-AC6.6,
+**Refs.** `requirements.md` AC3.4, AC4.3-AC4.5, AC6.1-AC6.6,
 AC11.2, AC11.4-AC11.5, and AC12.1-AC12.2; `design.md` §1.2-§1.3,
 §2.1-§2.2, §3.6, §5.3, §6.1-§6.3, and §11.1-§11.3.
 
@@ -230,9 +230,10 @@ and §7.1-§7.3.
 
 - `/v3/api-docs` returns valid OpenAPI and `/swagger-ui.html` resolves without credentials;
   Actuator paths are absent.
-- `OpenApiIT` proves five operations and stable IDs, exact six-field schemas, decimal/integer and
-  serial constraints, paging/sort defaults and bounds, typed `PagedModel`, success/error statuses,
-  examples, and absence of `PATCH` and security schemes.
+- `OpenApiIT` proves the four skeleton-owned operations and stable IDs, exact six-field schemas,
+  decimal/integer and serial constraints, paging/sort defaults and bounds, typed `PagedModel`,
+  success/error statuses, examples, and absence of `PATCH` and security schemes. Price Creation
+  tasks T1 owns the `createPricing` assertions in the same generated document.
 - Every `$ref` resolves, pricing/problem examples conform to schemas, and changing a path, field,
   constraint, operation, or response makes the test fail.
 - `mvn -B -ntp clean verify` succeeds.
@@ -285,8 +286,11 @@ and §7.1-§7.3.
 - Inspection proves UID/GID `10001`, `/opt/pricing/pricing.jar`, and `/readyz` container health.
 - The executable bootstrap is identifier-safe, creates only the local restricted role/schema, and
   prints no password or creates no application/history tables.
-- Smoke verification proves create/retrieve, application restart, database-outage readiness `503`
-  with liveness `200`, recovery, stack recreation without volume deletion, and persisted retrieval.
+- Smoke verification uses the creation operation owned by Price Creation tasks T1 as setup, then
+  proves retrieval, application restart, database-outage readiness `503` with liveness `200`,
+  recovery, stack recreation without volume deletion, and persisted retrieval. The original
+  skeleton task was completed before Inventory validation; Price Creation tasks T2 now tracks the
+  self-contained Inventory fixture required to restore this assertion.
 - Both shell scripts pass `bash -n`, use bounded waits/cleanup, expose no secret, and
   `mvn -B -ntp clean verify` succeeds before acceptance.
 
@@ -310,12 +314,13 @@ and §7.1-§7.3.
 - README covers every topic in `design.md` §10.3, labels local credentials development-only, and
   contains no production secret.
 - Every documented command uses implemented names, ports, variables, artifacts, and paths.
-- Executable examples cover create, retrieve, paginated/sorted list, replace, and delete with
-  valid payloads.
+- Executable examples cover retrieve, paginated/sorted list, replace, and delete with valid
+  payloads. The creation example is governed by Price Creation requirements AC4.3 and tasks T1.
 - `./mvnw -B -ntp clean verify`, `mvn -B -ntp clean verify`, and final
   `mvn -B -ntp clean verify` succeed on Java 25 with no skipped suites or checks.
 - The container smoke test succeeds from a clean checkout and cleans up its isolated stack after
-  testing persisted-volume behavior.
+  testing persisted-volume behavior. Restoring that assertion after Inventory validation is
+  tracked by Price Creation tasks T2.
 - The traceability table below has no uncovered criterion and reports identify successful unit,
   integration, OpenAPI, architecture, and formatting checks.
 
@@ -323,7 +328,6 @@ and §7.1-§7.3.
 
 | Acceptance criteria | Primary task and regression-sensitive DoD |
 | --- | --- |
-| AC1.1-AC1.4 | T3 create, validation, duplicate, persistence, and unchanged-state assertions |
 | AC2.1-AC2.2 | T3 found, invalid-identifier, and missing-pricing assertions |
 | AC3.1-AC3.5 | T4 page envelope, pagination, all sorts, rejection, and empty-page matrix |
 | AC4.1-AC4.5 | T5 replacement, immutability, validation, preservation, and no-upsert assertions |
@@ -342,7 +346,7 @@ and §7.1-§7.3.
 | AC11.1 | T1 configured lifecycle and T10 clean lifecycle with all suites active |
 | AC11.2 | T2, T3, T5, and T6 no-context unit tests with Mockito where needed |
 | AC11.3 | T2-T8 PostgreSQL Testcontainers integration suites |
-| AC11.4 | T2-T6 migration, CRUD, paging/sort, validation, conflict, and not-found assertions |
+| AC11.4 | T2-T6 migration, retrieval, paging/sort, replacement, deletion, validation, and not-found assertions |
 | AC11.5 | T6 ArchUnit dependency, placement, naming, annotation, and cycle assertions |
 | AC11.6 | T7 generated OpenAPI drift assertions |
 | AC12.1-AC12.2 | T3-T6 credential-free operations and T6-T7 absence checks |

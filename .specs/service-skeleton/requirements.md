@@ -1,13 +1,18 @@
 # Pricing Service Skeleton Requirements
 
-Status: Requirements, design, and implementation tasks defined; ready for implementation.
+Status: Implemented; the linked Price Creation container-smoke follow-up remains pending.
 
 ## Context
 
-RentFlow needs a pricing service that owns the pricing terms assigned to equipment. The repository
-currently has no application skeleton, so this increment establishes the smallest useful pricing
-CRUD API together with the engineering baseline required to build, run, inspect, and verify it.
-Actual rental-price calculation is intentionally deferred to a later feature.
+RentFlow needs a pricing service that owns the pricing terms assigned to equipment. This feature
+defines the shared pricing representation, persistence and HTTP foundations, non-creation
+resource operations, and the engineering baseline required to build, run, inspect, and verify
+the service. Actual rental-price calculation is intentionally deferred to a later feature.
+
+Price creation has its own source of truth:
+[`.specs/price-creation`](../price-creation/requirements.md). This skeleton retains only the
+shared contracts used by creation and a capability reference; it does not duplicate creation
+ordering, Inventory integration, resilience, or creation-specific outcomes.
 
 The initial pricing resource has exactly these business attributes:
 
@@ -24,7 +29,7 @@ The service exposes an unauthenticated JSON REST API under `/api/v1/pricing`:
 
 | Capability | Method and resource |
 | --- | --- |
-| Create pricing | `POST /api/v1/pricing` |
+| Create pricing | `POST /api/v1/pricing` — [Price Creation requirements](../price-creation/requirements.md) |
 | List pricing | `GET /api/v1/pricing` |
 | Retrieve pricing | `GET /api/v1/pricing/{serialNumber}` |
 | Fully replace pricing | `PUT /api/v1/pricing/{serialNumber}` |
@@ -43,21 +48,12 @@ the Pricing-owned schema.
 
 ## User stories
 
-### US1 - Create pricing
+### Feature-owned capability - Create pricing
 
-As a pricing operator, I want to register pricing terms for an equipment serial number so that
-RentFlow can retain the terms used by later rental workflows.
-
-- **AC1.1 (Event-driven):** When a client submits a valid complete pricing representation, the
-  pricing service shall persist it and return `201 Created` with the created representation and a
-  `Location` header for that resource.
-- **AC1.2 (Ubiquitous):** The pricing service shall use the client-supplied `serialNumber` and
-  shall not generate or replace it.
-- **AC1.3 (Unwanted):** If a client submits a `serialNumber` that already identifies pricing, then
-  the pricing service shall return `409 Conflict` and shall leave the existing pricing unchanged.
-- **AC1.4 (Unwanted):** If a create request is malformed, incomplete, contains an unknown property,
-  or violates a pricing-field constraint, then the pricing service shall return `400 Bad Request`
-  and shall not persist pricing.
+Creation requirements, Inventory validation, retries, circuit breaking, persistence ordering,
+and creation-specific failures are defined in the
+[Price Creation requirements](../price-creation/requirements.md). The shared representation,
+field constraints, persistence model, and Problem Details envelope remain defined here.
 
 ### US2 - Retrieve pricing
 
@@ -200,8 +196,9 @@ and test the service from a clean checkout.
   and OpenAPI.
 - **AC10.2 (Ubiquitous):** The repository README shall document the single Maven verification
   command and shall explain the checks it runs.
-- **AC10.3 (Ubiquitous):** The repository README shall contain executable examples for create,
-  retrieve, paginated/sorted list, replace, and delete operations.
+- **AC10.3 (Ubiquitous):** The repository README shall contain executable examples for retrieve,
+  paginated/sorted list, replace, and delete operations; linked feature specifications shall own
+  requirements for their additional operation examples.
 - **AC10.4 (Ubiquitous):** The repository shall include Maven Wrapper so contributors can run the
   lifecycle without installing Maven.
 
@@ -218,9 +215,10 @@ before changes are integrated.
 - **AC11.3 (Ubiquitous):** The pricing service's persistence and full-stack integration tests
   shall use Testcontainers with real PostgreSQL 18.4 and shall require no manually provisioned
   test database.
-- **AC11.4 (Ubiquitous):** The pricing service's integration tests shall verify migrations, CRUD,
-  pagination, sorting, validation, conflict, and not-found behavior through externally observable
-  results.
+- **AC11.4 (Ubiquitous):** The pricing service's integration tests shall verify migrations,
+  retrieval, pagination, sorting, replacement, deletion, validation, and not-found behavior
+  through externally observable results; linked feature specifications shall own their additional
+  operation-specific integration checks.
 - **AC11.5 (Ubiquitous):** The pricing service's architecture tests shall enforce the prescribed
   configuration, controller, converter, DTO, service, repository, entity, and utility boundaries.
 - **AC11.6 (Ubiquitous):** The pricing service's automated tests shall verify that the generated
@@ -247,15 +245,18 @@ authentication does not block validation of the service skeleton.
   ETags, conditional writes, bulk operations, and imports or exports.
 - Generated serial numbers or changes to a serial number after creation.
 - Collection filtering and full-text, fuzzy, or range search.
-- Cross-service queries, foreign keys, and migrations against objects owned by other services.
+- Cross-service queries other than the create-time Inventory check defined by
+  [Price Creation](../price-creation/requirements.md), cross-service foreign keys, and migrations
+  against objects owned by other services.
 - Production orchestration, cloud infrastructure, CI/CD, database backups, replication, and high
   availability.
 - A user interface other than Swagger UI and compatibility guarantees beyond `/api/v1`.
 
 ## Resolved questions
 
-1. **Initial capability:** This increment is CRUD-only; price calculation is deferred. See
-   `design.md` §2.4 and §12.
+1. **Initial capability:** This service increment manages pricing resources but does not calculate
+   rental totals. Creation is owned by [Price Creation](../price-creation/requirements.md); the
+   remaining resource and calculation boundary is defined in `design.md` §2.4 and §12.
 2. **Money representation:** `price` and `deposit` are currency-agnostic decimals stored as
    `numeric(19,2)`. See `design.md` §4.1 and §5.1.
 3. **Money bounds:** `price` is greater than zero and `deposit` is non-negative. See `design.md`
@@ -282,5 +283,10 @@ authentication does not block validation of the service skeleton.
     development; deployed infrastructure provisions them externally. See `design.md` §9.2.
 13. **Container delivery:** The repository includes a multi-stage Java 25 image and Compose stack
     with services `pricing` and `rentflow-postgres`. See `design.md` §9.
-14. **Increment strategy:** Implementation proceeds as verified, dependency-ordered commits in
-    `tasks.md` §2-§3, although this scaffold may be delivered as one working-tree change.
+14. **Increment strategy:** The skeleton was delivered through the verified,
+    dependency-ordered implementation map in `tasks.md` §2-§3. Later features own their
+    operation-specific task history.
+15. **Specification ownership:** Shared resource, validation, persistence, error-envelope,
+    platform, and non-creation behavior stays in this feature. Creation behavior moved to
+    [Price Creation](../price-creation/requirements.md), and the original AC2-AC12 identifiers are
+    retained to keep existing traceability stable. See `design.md` §1.1.

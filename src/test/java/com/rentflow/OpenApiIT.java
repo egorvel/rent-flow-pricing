@@ -13,10 +13,21 @@ import org.springframework.http.MediaType;
 import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.web.client.HttpClientErrorException;
+import org.springframework.web.client.HttpServerErrorException;
+import org.springframework.web.client.ResourceAccessException;
 
 import com.rentflow.dto.PricingDTO;
 import com.rentflow.support.PostgresIntegrationTest;
 
+import io.github.resilience4j.circuitbreaker.CircuitBreaker;
+import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
+import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
+import io.github.resilience4j.core.functions.Either;
+import io.github.resilience4j.retry.Retry;
+import io.github.resilience4j.retry.RetryConfig;
+import io.github.resilience4j.retry.RetryRegistry;
+import io.micrometer.core.instrument.MeterRegistry;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
@@ -38,6 +49,15 @@ class OpenApiIT extends PostgresIntegrationTest {
 
     @Autowired
     private ObjectMapper objectMapper;
+
+    @Autowired
+    private CircuitBreakerRegistry circuitBreakerRegistry;
+
+    @Autowired
+    private RetryRegistry retryRegistry;
+
+    @Autowired
+    private MeterRegistry meterRegistry;
 
     private JsonNode document;
 
@@ -158,7 +178,7 @@ class OpenApiIT extends PostgresIntegrationTest {
     @Test
     void documentsSuccessAndApplicableProblemResponses() {
         JsonNode create = operation("/api/v1/pricing", "post");
-        assertResponseCodes(create, "201", "400", "406", "409", "415", "500");
+        assertResponseCodes(create, "201", "400", "406", "409", "415", "422", "500", "502", "503");
         assertResponseSchema(create, "201", MediaType.APPLICATION_JSON_VALUE, "PricingDTO");
         assertThat(create.at("/responses/201/headers/Location/schema/format").asString())
                 .isEqualTo("uri");
@@ -180,11 +200,67 @@ class OpenApiIT extends PostgresIntegrationTest {
         assertResponseCodes(delete, "204", "400", "404", "500");
         assertThat(delete.at("/responses/204").has("content")).isFalse();
 
-        assertProblemSchemas(create, Set.of("400", "406", "409", "415", "500"));
+        assertProblemSchemas(create, Set.of("400", "406", "409", "415", "422", "500", "502", "503"));
         assertProblemSchemas(list, Set.of("400", "406", "500"));
         assertProblemSchemas(get, Set.of("400", "404", "406", "500"));
         assertProblemSchemas(replace, Set.of("400", "404", "406", "415", "500"));
         assertProblemSchemas(delete, Set.of("400", "404", "500"));
+    }
+
+    @Test
+    void loadsTheInventoryResilienceConfigurationAndPublishesMetrics() {
+        CircuitBreaker circuitBreaker = circuitBreakerRegistry.circuitBreaker("inventory");
+        CircuitBreakerConfig circuitBreakerConfig = circuitBreaker.getCircuitBreakerConfig();
+        assertThat(circuitBreakerConfig.getSlidingWindowType())
+                .isEqualTo(CircuitBreakerConfig.SlidingWindowType.COUNT_BASED);
+        assertThat(circuitBreakerConfig.getSlidingWindowSize()).isEqualTo(20);
+        assertThat(circuitBreakerConfig.getMinimumNumberOfCalls()).isEqualTo(10);
+        assertThat(circuitBreakerConfig.getFailureRateThreshold()).isEqualTo(50.0f);
+        assertThat(circuitBreakerConfig.getWaitIntervalFunctionInOpenState().apply(1))
+                .isEqualTo(30_000L);
+        assertThat(circuitBreakerConfig.getPermittedNumberOfCallsInHalfOpenState())
+                .isEqualTo(3);
+        assertThat(circuitBreakerConfig.getRecordExceptionPredicate().test(new ResourceAccessException("network")))
+                .isTrue();
+        assertThat(circuitBreakerConfig
+                        .getRecordExceptionPredicate()
+                        .test(new HttpServerErrorException(org.springframework.http.HttpStatus.INTERNAL_SERVER_ERROR)))
+                .isTrue();
+        assertThat(circuitBreakerConfig
+                        .getIgnoreExceptionPredicate()
+                        .test(new HttpClientErrorException(org.springframework.http.HttpStatus.CONFLICT)))
+                .isTrue();
+
+        Retry retry = retryRegistry.retry("inventory");
+        RetryConfig retryConfig = retry.getRetryConfig();
+        assertThat(retryConfig.getMaxAttempts()).isEqualTo(2);
+        assertThat(retryConfig.getExceptionPredicate().test(new ResourceAccessException("network")))
+                .isTrue();
+        assertThat(retryConfig
+                        .getExceptionPredicate()
+                        .test(new HttpServerErrorException(org.springframework.http.HttpStatus.BAD_GATEWAY)))
+                .isTrue();
+        assertThat(retryConfig
+                        .getExceptionPredicate()
+                        .test(new HttpServerErrorException(org.springframework.http.HttpStatus.INTERNAL_SERVER_ERROR)))
+                .isFalse();
+        Long retryWait = retryConfig
+                .<Object>getIntervalBiFunction()
+                .apply(1, Either.left(new ResourceAccessException("network")));
+        assertThat(retryWait).isBetween(400L, 600L);
+
+        circuitBreaker.executeSupplier(() -> true);
+        retry.executeSupplier(() -> true);
+        assertThat(meterRegistry
+                        .find("resilience4j.circuitbreaker.calls")
+                        .tag("name", "inventory")
+                        .meters())
+                .isNotEmpty();
+        assertThat(meterRegistry
+                        .find("resilience4j.retry.calls")
+                        .tag("name", "inventory")
+                        .meters())
+                .isNotEmpty();
     }
 
     @Test

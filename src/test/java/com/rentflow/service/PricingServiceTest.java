@@ -31,11 +31,15 @@ class PricingServiceTest {
     @Mock
     private PricingRepository repository;
 
+    @Mock
+    private InventoryGateway inventoryGateway;
+
     @Test
     void createsAndFlushesPricingWithTheAssignedSerialNumber() {
         when(repository.existsById("DRILL-001")).thenReturn(false);
+        when(inventoryGateway.exists("DRILL-001")).thenReturn(true);
         when(repository.saveAndFlush(any(Pricing.class))).thenAnswer(invocation -> invocation.getArgument(0));
-        PricingService service = new PricingService(repository);
+        PricingService service = new PricingService(repository, inventoryGateway);
 
         Pricing created = service.create(pricing("DRILL-001", "125.50"));
 
@@ -48,10 +52,36 @@ class PricingServiceTest {
     @Test
     void rejectsAnExistingSerialBeforeSaving() {
         when(repository.existsById("DRILL-001")).thenReturn(true);
-        PricingService service = new PricingService(repository);
+        PricingService service = new PricingService(repository, inventoryGateway);
 
         assertThatThrownBy(() -> service.create(pricing("DRILL-001", "125.50")))
                 .isInstanceOf(PricingAlreadyExistsException.class);
+
+        verify(repository, never()).saveAndFlush(any());
+        verify(inventoryGateway, never()).exists(any());
+    }
+
+    @Test
+    void rejectsASerialThatDoesNotExistInInventoryWithoutSaving() {
+        when(repository.existsById("MISSING")).thenReturn(false);
+        when(inventoryGateway.exists("MISSING")).thenReturn(false);
+        PricingService service = new PricingService(repository, inventoryGateway);
+
+        assertThatThrownBy(() -> service.create(pricing("MISSING", "125.50")))
+                .isInstanceOf(InventoryItemNotFoundException.class);
+
+        verify(repository, never()).saveAndFlush(any());
+    }
+
+    @Test
+    void doesNotSaveWhenTheInventoryLookupFails() {
+        InventoryServiceUnavailableException failure = new InventoryServiceUnavailableException(
+                "DRILL-001", new IllegalStateException("inventory unavailable"));
+        when(repository.existsById("DRILL-001")).thenReturn(false);
+        when(inventoryGateway.exists("DRILL-001")).thenThrow(failure);
+        PricingService service = new PricingService(repository, inventoryGateway);
+
+        assertThatThrownBy(() -> service.create(pricing("DRILL-001", "125.50"))).isSameAs(failure);
 
         verify(repository, never()).saveAndFlush(any());
     }
@@ -59,8 +89,9 @@ class PricingServiceTest {
     @Test
     void translatesAConcurrentPrimaryKeyFailureToConflict() {
         when(repository.existsById("DRILL-001")).thenReturn(false);
+        when(inventoryGateway.exists("DRILL-001")).thenReturn(true);
         when(repository.saveAndFlush(any(Pricing.class))).thenThrow(new DataIntegrityViolationException("duplicate"));
-        PricingService service = new PricingService(repository);
+        PricingService service = new PricingService(repository, inventoryGateway);
 
         assertThatThrownBy(() -> service.create(pricing("DRILL-001", "125.50")))
                 .isInstanceOf(PricingAlreadyExistsException.class);
@@ -70,7 +101,7 @@ class PricingServiceTest {
     void returnsExistingPricing() {
         Pricing pricing = pricing("DRILL-001", "125.50");
         when(repository.findById("DRILL-001")).thenReturn(Optional.of(pricing));
-        PricingService service = new PricingService(repository);
+        PricingService service = new PricingService(repository, inventoryGateway);
 
         assertThat(service.get("DRILL-001")).isSameAs(pricing);
     }
@@ -78,7 +109,7 @@ class PricingServiceTest {
     @Test
     void rejectsMissingPricingWithoutMutation() {
         when(repository.findById("MISSING")).thenReturn(Optional.empty());
-        PricingService service = new PricingService(repository);
+        PricingService service = new PricingService(repository, inventoryGateway);
 
         assertThatThrownBy(() -> service.get("MISSING")).isInstanceOf(PricingNotFoundException.class);
 
@@ -89,7 +120,7 @@ class PricingServiceTest {
     @Test
     void buildsDeterministicNonSerialSorting() {
         when(repository.findAll(any(Pageable.class))).thenReturn(Page.empty());
-        PricingService service = new PricingService(repository);
+        PricingService service = new PricingService(repository, inventoryGateway);
 
         service.list(2, 15, PricingSortField.PRICE, Sort.Direction.DESC);
 
@@ -108,7 +139,7 @@ class PricingServiceTest {
     @Test
     void doesNotAddARedundantTieBreakerToUniqueSerialSorting() {
         when(repository.findAll(any(Pageable.class))).thenReturn(Page.empty());
-        PricingService service = new PricingService(repository);
+        PricingService service = new PricingService(repository, inventoryGateway);
 
         service.list(0, 20, PricingSortField.SERIAL_NUMBER, Sort.Direction.DESC);
 
@@ -123,7 +154,7 @@ class PricingServiceTest {
     void replacesOnlyMutableDetailsOnExistingPricing() {
         Pricing pricing = pricing("DRILL-001", "125.50");
         when(repository.findById("DRILL-001")).thenReturn(Optional.of(pricing));
-        PricingService service = new PricingService(repository);
+        PricingService service = new PricingService(repository, inventoryGateway);
         Pricing replacement = new Pricing(
                 "DRILL-001",
                 new BigDecimal("150.00"),
@@ -148,7 +179,7 @@ class PricingServiceTest {
     @Test
     void rejectsReplacementOfMissingPricingWithoutMutation() {
         when(repository.findById("MISSING")).thenReturn(Optional.empty());
-        PricingService service = new PricingService(repository);
+        PricingService service = new PricingService(repository, inventoryGateway);
 
         assertThatThrownBy(() -> service.replace(pricing("MISSING", "125.50")))
                 .isInstanceOf(PricingNotFoundException.class);
@@ -161,7 +192,7 @@ class PricingServiceTest {
     void loadsExistingPricingBeforeDeletingIt() {
         Pricing pricing = pricing("DRILL-001", "125.50");
         when(repository.findById("DRILL-001")).thenReturn(Optional.of(pricing));
-        PricingService service = new PricingService(repository);
+        PricingService service = new PricingService(repository, inventoryGateway);
 
         service.delete("DRILL-001");
 
@@ -174,7 +205,7 @@ class PricingServiceTest {
     @Test
     void rejectsDeletionOfMissingPricingWithoutMutation() {
         when(repository.findById("MISSING")).thenReturn(Optional.empty());
-        PricingService service = new PricingService(repository);
+        PricingService service = new PricingService(repository, inventoryGateway);
 
         assertThatThrownBy(() -> service.delete("MISSING")).isInstanceOf(PricingNotFoundException.class);
 
