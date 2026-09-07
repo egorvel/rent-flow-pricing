@@ -31,7 +31,7 @@ services:
       rentflow-postgres:
         condition: service_healthy
     ports:
-      - "8080:8080"
+      - "${PRICING_PORT:-8081}:8080"
 
 volumes:
   rentflow-postgres-data:
