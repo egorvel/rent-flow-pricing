@@ -17,17 +17,20 @@ import com.rentflow.repository.PricingRepository;
 public class PricingService {
 
     private final PricingRepository repository;
+    private final InventoryGateway inventoryGateway;
 
-    public PricingService(PricingRepository repository) {
+    public PricingService(PricingRepository repository, InventoryGateway inventoryGateway) {
         this.repository = repository;
+        this.inventoryGateway = inventoryGateway;
     }
 
-    @Transactional
     public Pricing create(Pricing pricing) {
         if (repository.existsById(pricing.getSerialNumber())) {
             throw new PricingAlreadyExistsException(pricing.getSerialNumber());
         }
-
+        if (!inventoryGateway.exists(pricing.getSerialNumber())) {
+            throw new InventoryItemNotFoundException(pricing.getSerialNumber());
+        }
         try {
             return repository.saveAndFlush(pricing);
         } catch (DataIntegrityViolationException exception) {

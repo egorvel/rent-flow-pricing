@@ -73,7 +73,8 @@ public class PricingController {
                                 schema = @Schema(implementation = PricingDTO.class))),
         @ApiResponse(
                 responseCode = "400",
-                description = "Request validation failed or the JSON body is malformed.",
+                description =
+                        "Request validation failed, the JSON body is malformed, or Inventory rejected the serial number.",
                 content =
                         @Content(
                                 mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
@@ -95,6 +96,27 @@ public class PricingController {
         @ApiResponse(
                 responseCode = "415",
                 description = "The request media type is unsupported.",
+                content =
+                        @Content(
+                                mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
+                                schema = @Schema(implementation = ProblemResponse.class))),
+        @ApiResponse(
+                responseCode = "422",
+                description = "The serial number does not identify an Inventory item.",
+                content =
+                        @Content(
+                                mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
+                                schema = @Schema(implementation = ProblemResponse.class))),
+        @ApiResponse(
+                responseCode = "502",
+                description = "Inventory returned an unexpected response.",
+                content =
+                        @Content(
+                                mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
+                                schema = @Schema(implementation = ProblemResponse.class))),
+        @ApiResponse(
+                responseCode = "503",
+                description = "Inventory is temporarily unavailable.",
                 content =
                         @Content(
                                 mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,

@@ -29,6 +29,10 @@ import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import com.rentflow.dto.ProblemResponse;
 import com.rentflow.dto.ViolationResponse;
+import com.rentflow.service.InvalidInventoryReferenceException;
+import com.rentflow.service.InventoryItemNotFoundException;
+import com.rentflow.service.InventoryServiceResponseException;
+import com.rentflow.service.InventoryServiceUnavailableException;
 import com.rentflow.service.PricingAlreadyExistsException;
 import com.rentflow.service.PricingNotFoundException;
 
@@ -60,6 +64,58 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
                 "Pricing already exists",
                 "Pricing for serial number '" + exception.getSerialNumber() + "' already exists.",
                 "PRICING_ALREADY_EXISTS",
+                request,
+                List.of());
+    }
+
+    @ExceptionHandler(InvalidInventoryReferenceException.class)
+    ResponseEntity<ProblemResponse> handleInvalidInventoryReference(
+            InvalidInventoryReferenceException exception, WebRequest request) {
+        return response(
+                HttpStatus.BAD_REQUEST,
+                "urn:rentflow:problem:invalid-inventory-reference",
+                "Invalid inventory reference",
+                "Inventory rejected serial number '" + exception.getSerialNumber() + "' as invalid.",
+                "INVALID_INVENTORY_REFERENCE",
+                request,
+                List.of());
+    }
+
+    @ExceptionHandler(InventoryItemNotFoundException.class)
+    ResponseEntity<ProblemResponse> handleInventoryItemNotFound(
+            InventoryItemNotFoundException exception, WebRequest request) {
+        return response(
+                HttpStatus.UNPROCESSABLE_CONTENT,
+                "urn:rentflow:problem:inventory-item-not-found",
+                "Inventory item not found",
+                "Inventory item '" + exception.getSerialNumber() + "' was not found.",
+                "INVENTORY_ITEM_NOT_FOUND",
+                request,
+                List.of());
+    }
+
+    @ExceptionHandler(InventoryServiceResponseException.class)
+    ResponseEntity<ProblemResponse> handleInventoryServiceResponse(
+            InventoryServiceResponseException exception, WebRequest request) {
+        return response(
+                HttpStatus.BAD_GATEWAY,
+                "urn:rentflow:problem:inventory-service-error",
+                "Inventory service error",
+                "Inventory service returned an unexpected response.",
+                "INVENTORY_SERVICE_ERROR",
+                request,
+                List.of());
+    }
+
+    @ExceptionHandler(InventoryServiceUnavailableException.class)
+    ResponseEntity<ProblemResponse> handleInventoryServiceUnavailable(
+            InventoryServiceUnavailableException exception, WebRequest request) {
+        return response(
+                HttpStatus.SERVICE_UNAVAILABLE,
+                "urn:rentflow:problem:inventory-service-unavailable",
+                "Inventory service unavailable",
+                "Inventory service is temporarily unavailable.",
+                "INVENTORY_SERVICE_UNAVAILABLE",
                 request,
                 List.of());
     }

@@ -6,4 +6,4 @@ target/
 .settings/
 .env
 *.log
-.specs/service-skeleton/eval-reports/
+.specs/**/eval-reports/

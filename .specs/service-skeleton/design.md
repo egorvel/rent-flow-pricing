@@ -1,15 +1,19 @@
 # Pricing Service Skeleton Design
 
-Status: Design and implementation tasks defined; ready for implementation.
+Status: Implemented; Price Creation tasks T2 tracks the container-smoke integration gap.
 
 This document implements `requirements.md`. Numbered sections are stable traceability targets.
+The [Price Creation design](../price-creation/design.md) owns the `POST` workflow, Inventory
+integration, resilience, and creation-specific outcomes.
 
 ## 1. Architecture
 
 ### 1.1 Runtime and platform baseline
 
 The service is one Maven module and one deployable Spring Boot process. A layered monolith is
-appropriate because this increment owns one aggregate and has no external service integration.
+appropriate because the service owns one aggregate. Feature-specific outbound integrations use
+ports and adapters without changing the shared layer model; Price Creation currently adds the
+Inventory integration described in its design §1 and §4.
 
 | Concern | Decision |
 | --- | --- |
@@ -28,7 +32,9 @@ appropriate because this increment owns one aggregate and has no external servic
 | Formatting | Spotless Maven Plugin 3.8.0 with palantir-java-format 2.96.0 |
 
 These versions match the verified Inventory-service baseline. Spring Boot manages supported
-transitive dependency versions; the project does not independently override them.
+transitive dependency versions except where a feature deliberately imports its own compatible
+BOM. The Resilience4j version and dependency rationale are owned by the Price Creation design
+§1.3.
 
 Spring MVC is used rather than WebFlux because JPA and JDBC are blocking. Spring Data REST is not
 used because the API requires explicit DTOs, stable errors, strict sorting, and deliberate
@@ -50,7 +56,9 @@ controllers, or generic CRUD abstractions.
 | `com.rentflow.model` | `Pricing` | Persisted domain state |
 | `com.rentflow.util` | Initially empty | Shared helpers only after a demonstrated need |
 
-The request flow is:
+Creation-specific types in `config`, `service`, and `service.rest` are listed once in the
+Price Creation design §1.2. The shared local request flow used by retrieval, browsing,
+replacement, and deletion is:
 
 ```text
 HTTP request -> PricingController -> PricingService -> PricingRepository -> PostgreSQL
@@ -58,8 +66,9 @@ HTTP request -> PricingController -> PricingService -> PricingRepository -> Post
 ```
 
 JPA entities are never serialized directly. The controller validates transport values; the
-service owns existence checks, mutations, and transaction boundaries; the repository owns
-database access; the converter produces immutable response records.
+service owns local existence checks, mutations, and transaction boundaries; the repository owns
+database access; the converter produces immutable response records. The create flow and its
+Inventory port are defined in the Price Creation design §1.2.
 
 ### 1.3 Dependency boundaries
 
@@ -73,7 +82,7 @@ ArchUnit enforces these application-layer dependencies:
 | `service` | `model`, `repository` |
 | `repository` | `model` |
 | `model` | No other application layer |
-| `config` | Framework APIs and `dto` only when documentation needs schemas |
+| `config` | Framework APIs, `dto`, and `service` |
 | `util` | No other application layer |
 
 Lower layers do not depend on controllers or DTOs. Controllers do not call repositories. Package
@@ -83,9 +92,9 @@ suffixes, and only controllers own Spring MVC mapping annotations.
 ### 1.4 Transaction boundaries
 
 `PricingService` is a concrete Spring `@Service`. Reads use `@Transactional(readOnly = true)`;
-create, replace, and delete use `@Transactional`. Create calls `saveAndFlush` so a primary-key
-race is observed inside the use case and translated to a stable `409`. Delete loads before
-removing so missing pricing produces `404`.
+replace and delete use `@Transactional`. Delete loads before removing so missing pricing
+produces `404`. Create intentionally uses a different boundary so no database transaction is
+held across its Inventory call; Price Creation design §3.3 is authoritative for that decision.
 
 Open Session in View is disabled. The entity has eager scalar fields only and is converted inside
 the controller after the transactional service returns.
@@ -110,7 +119,7 @@ credentials. CORS retains Spring's disabled-by-default behavior.
 
 ### 2.3 Resource representations
 
-`PricingDTO` is the complete create, replacement, and response representation:
+`PricingDTO` is the complete write and response representation:
 
 ```json
 {
@@ -165,18 +174,11 @@ rounding, currency, and deposit inclusion before adding calculation behavior.
 
 ### 3.1 Create pricing
 
-`POST /api/v1/pricing` accepts `PricingDTO`.
-
-| Result | Status | Body and headers |
-| --- | --- | --- |
-| Created | `201 Created` | DTO plus `Location: /api/v1/pricing/{serialNumber}` |
-| Invalid representation | `400 Bad Request` | Validation or malformed-JSON problem |
-| Duplicate serial | `409 Conflict` | Pricing-already-exists problem |
-| Unsupported request media | `415 Unsupported Media Type` | Media-type problem |
-
-The service performs a readable `existsById` check and also translates a
-`DataIntegrityViolationException` from `saveAndFlush`, closing the concurrent-insert race. The
-serial-number alphabet is safe in a URI path segment, so `Location` needs no lossy conversion.
+`POST /api/v1/pricing` is implemented, but its operation contract is owned by
+[Price Creation requirements](../price-creation/requirements.md) and its technical flow is owned
+by [Price Creation design](../price-creation/design.md). This skeleton supplies only the shared
+`PricingDTO`, validation, persistence, generic error envelope, and OpenAPI foundations used by
+that feature.
 
 ### 3.2 Retrieve pricing
 
@@ -298,7 +300,8 @@ controller maps the returned `Page<Pricing>` to DTOs and wraps it in Spring Data
 PostgreSQL is the final authority for serial uniqueness. All failed writes roll back. Replacement
 mutates only an entity loaded in the same transaction; deletion loads and removes in one
 transaction. There is no `@Version`, ETag, or conditional update. Committed rows survive process
-restarts because no lifecycle hook clears the schema.
+restarts because no lifecycle hook clears the schema. Price Creation design §3.2 owns the
+operation-specific uniqueness race and conflict translation.
 
 ## 5. Validation and invariants
 
@@ -341,10 +344,10 @@ constraints enforce numeric shape and bounds at their respective boundaries.
 ### 5.3 Validation ordering and atomicity
 
 JSON parsing and Bean Validation happen before service mutation. `PUT` path/body equality is
-checked before loading the entity. Duplicate detection occurs after validation. Rejected writes
-leave database state unchanged. A JSON token that cannot be converted to a declared field type is
-reported as a field validation violation when the field is identifiable; unreadable JSON syntax
-uses the separate malformed-JSON problem.
+checked before loading the entity. Rejected writes leave database state unchanged. A JSON token
+that cannot be converted to a declared field type is reported as a field validation violation
+when the field is identifiable; unreadable JSON syntax uses the separate malformed-JSON problem.
+Price Creation design §2.1 and §3.1 own creation-specific validation and decision ordering.
 
 ## 6. Error contract
 
@@ -377,7 +380,6 @@ present only for validation failures, is non-empty, and is sorted by field then 
 | Validation | `400` | `urn:rentflow:problem:validation-failed` | `VALIDATION_FAILED` | `Request validation failed` |
 | Malformed JSON | `400` | `urn:rentflow:problem:malformed-json` | `MALFORMED_JSON` | `Malformed JSON` |
 | Pricing absent | `404` | `urn:rentflow:problem:pricing-not-found` | `PRICING_NOT_FOUND` | `Pricing not found` |
-| Serial exists | `409` | `urn:rentflow:problem:pricing-already-exists` | `PRICING_ALREADY_EXISTS` | `Pricing already exists` |
 | Method unsupported | `405` | `urn:rentflow:problem:method-not-allowed` | `METHOD_NOT_ALLOWED` | `Method not allowed` |
 | Response media unavailable | `406` | `urn:rentflow:problem:not-acceptable` | `NOT_ACCEPTABLE` | `Not acceptable` |
 | Request media unsupported | `415` | `urn:rentflow:problem:unsupported-media-type` | `UNSUPPORTED_MEDIA_TYPE` | `Unsupported media type` |
@@ -385,16 +387,17 @@ present only for validation failures, is non-empty, and is sorted by field then 
 | Other MVC client error | Original `4xx` | `urn:rentflow:problem:http-error` | `HTTP_ERROR` | `Request failed` |
 | Unexpected failure | `500` | `urn:rentflow:problem:internal-error` | `INTERNAL_ERROR` | `Internal server error` |
 
-Not-found detail is `Pricing for serial number '{serialNumber}' was not found.` Conflict detail is
-`Pricing for serial number '{serialNumber}' already exists.` Internal-error detail is always
-`An unexpected error occurred.`
+Not-found detail is `Pricing for serial number '{serialNumber}' was not found.` Internal-error
+detail is always `An unexpected error occurred.` Creation-specific conflict and Inventory
+problems are defined in Price Creation design §7.
 
 ### 6.3 Exception mapping and sanitization
 
 `ApiExceptionHandler` extends Spring MVC's `ResponseEntityExceptionHandler` and maps Bean
-Validation and conversion failures, unreadable bodies, `PricingNotFoundException`,
-`PricingAlreadyExistsException`, method and media errors, unmapped resources, other framework
-errors, and unexpected exceptions to the catalogue in §6.2.
+Validation and conversion failures, unreadable bodies, `PricingNotFoundException`, method and
+media errors, unmapped resources, other framework errors, and unexpected exceptions to the
+catalogue in §6.2. Price Creation design §4.3 and §7 own its adapter/domain translation and
+additional handler mappings.
 
 The unexpected handler logs the request method/path and complete throwable server-side. It does
 not log request bodies or credentials. Responses never serialize an exception class, stack trace,
@@ -410,11 +413,10 @@ limited to `/api/v1/**`, excluding Actuator. `OpenApiConfig` declares title
 
 ### 7.2 Operations and schemas
 
-Stable operation IDs are:
+Stable operation IDs owned by this skeleton are:
 
 | Operation | Operation ID |
 | --- | --- |
-| Create | `createPricing` |
 | List | `listPricing` |
 | Retrieve | `getPricing` |
 | Replace | `replacePricing` |
@@ -425,12 +427,16 @@ bounds, and the representative example from §2.3. The collection return type ge
 `PagedModel<PricingDTO>` with `content` and nested `page`. Controller annotations describe query
 defaults/bounds, success responses, and applicable problems. `PATCH` is absent.
 
+The `createPricing` operation ID and creation-specific responses are owned by Price Creation
+design §9.
+
 ### 7.3 Contract consistency
 
-`OpenApiIT` requests `/v3/api-docs` and checks all five operations and IDs; the six exact business
-properties; validation constraints; paging and sorting parameters; the page envelope; applicable
-success and error statuses; examples; absence of Actuator, `PATCH`, and security schemes; and
-resolution of every referenced component schema.
+`OpenApiIT` requests `/v3/api-docs` and checks the four skeleton-owned operations and IDs; the
+six exact business properties; validation constraints; paging and sorting parameters; the page
+envelope; applicable success and error statuses; examples; absence of Actuator, `PATCH`, and
+security schemes; and resolution of every referenced component schema. The same generated
+document contains `createPricing`; Price Creation design §9 and §10.2 own its assertions.
 
 ## 8. Configuration and health
 
@@ -466,6 +472,9 @@ liveness includes only `livenessState`, readiness includes `readinessState,db`, 
 hidden. The application contains no datasource URL or credentials. Deployments provide
 `SPRING_DATASOURCE_URL`, `SPRING_DATASOURCE_USERNAME`, `SPRING_DATASOURCE_PASSWORD`, optional
 `SERVER_PORT`, and optional `JAVA_TOOL_OPTIONS`.
+
+Inventory HTTP and Resilience4j configuration are feature-specific and are defined in Price
+Creation design §4-§8.
 
 ### 8.2 Liveness and readiness
 
@@ -518,8 +527,9 @@ readiness recovery without recreating Pricing.
 
 ### 10.1 Maven dependencies and lifecycle
 
-Main dependencies are focused Spring Boot Web MVC, Validation, Data JPA, Flyway, Actuator,
-Flyway's PostgreSQL module, the runtime PostgreSQL driver, and Springdoc. Test dependencies are
+Main foundation dependencies are focused Spring Boot Web MVC, Validation, Data JPA, Flyway,
+Actuator, Flyway's PostgreSQL module, the runtime PostgreSQL driver, and Springdoc. Price Creation
+design §1.3 owns its RestClient and Resilience4j additions. Test dependencies are
 Boot 4's focused Web MVC, Validation, Data JPA, and Flyway test starters plus Testcontainers
 PostgreSQL/JUnit Jupiter and ArchUnit. There is no H2, Spring Security, Lombok, or MapStruct.
 
@@ -538,8 +548,10 @@ and Wrapper commands execute the same lifecycle. The executable is `target/prici
 
 The root README documents purpose and fields, Java/PostgreSQL versions, Docker prerequisite,
 Wrapper and Maven builds, host and Compose startup/shutdown, destructive volume reset, local-only
-credentials, schema ownership, runtime variables, migrations, health, Swagger/OpenAPI, CRUD and
-paginated/sorted list examples, verification, and the container smoke test.
+credentials, schema ownership, runtime variables, migrations, health, Swagger/OpenAPI,
+resource-operation and paginated/sorted list examples, verification, and the container smoke
+test. Price Creation requirements AC4.3 and design §9 own creation-specific contract
+documentation.
 
 ## 11. Verification design
 
@@ -549,11 +561,14 @@ JUnit Jupiter, AssertJ, Jakarta Validation, and Mockito tests run without a Spri
 
 | Test | Focus |
 | --- | --- |
-| `PricingServiceTest` | Create, conflicts, get, list, replace, delete, and missing paths |
+| `PricingServiceTest` | Get, list, replace, delete, and missing paths |
 | `PricingConverterTest` | Exact entity-to-DTO mapping |
 | `PricingTest` | Immutable serial and mutable pricing details |
 | `PricingDTOTest` | All validation boundaries and valid zero values |
-| `ApiExceptionHandlerTest` | Stable, sanitized framework and unexpected failures |
+| `ApiExceptionHandlerTest` | Stable, sanitized shared framework and unexpected failures |
+
+Price Creation design §10.1 owns the create, Inventory adapter, Retry, and CircuitBreaker portions
+of `PricingServiceTest` and the additional focused unit-test classes.
 
 ### 11.2 Integration tests
 
@@ -565,9 +580,11 @@ Pricing rather than the administrator.
 `MigrationIT` proves V1 and schema-local history, database constraints, restricted ownership,
 absence of objects in `public`, preservation of a sentinel object in another schema, repeated
 startup/persistence, and startup failure when Pricing prerequisites are missing or inaccessible.
-`PricingIT` uses full Spring MVC plus real PostgreSQL to prove CRUD, validation, unknown JSON,
-pagination, all sorts and tie-breaking, stable conflicts including a concurrent race, errors, and
-credential-free access. `OpenApiIT` implements §7.3. Database state is cleared between tests.
+`PricingIT` uses full Spring MVC plus real PostgreSQL to prove retrieval, replacement,
+deletion, validation, unknown JSON, pagination, all sorts and tie-breaking, shared errors, and
+credential-free access. `OpenApiIT` implements §7.3. Price Creation design §10 owns the create,
+Inventory, conflict, and resilience portions of these shared test classes. Database state is
+cleared between tests.
 
 ### 11.3 Architecture tests
 
@@ -578,10 +595,12 @@ controller-to-repository prohibition, and exclusive controller ownership of MVC 
 
 `scripts/container-smoke-test.sh` validates Compose, builds the image, starts PostgreSQL, proves
 the bootstrap created only the restricted role/schema prerequisites, starts Pricing, inspects its
-unprivileged minimal runtime, creates/retrieves pricing, restarts Pricing, verifies persistence,
-stops PostgreSQL, observes readiness `503` and liveness `200`, restarts PostgreSQL, observes
-recovery, recreates the stack without deleting its volume, and retrieves the same pricing. It
-uses strict shell mode, bounded polling, a cleanup trap, and never prints secrets.
+unprivileged minimal runtime, verifies persistence across process and stack restarts, stops
+PostgreSQL, observes readiness `503` and liveness `200`, restarts PostgreSQL, observes
+recovery, and retrieves the same pricing. Its setup uses the feature-owned creation operation
+defined in Price Creation design §2-§4. Price Creation design §10.3 documents why that setup is
+currently incomplete, and Price Creation tasks T2 owns its repair. The script uses strict shell
+mode, bounded polling, a cleanup trap, and never prints secrets.
 
 ## 12. Edge cases
 
@@ -600,7 +619,6 @@ uses strict shell mode, bounded polling, a cleanup trap, and never prints secret
 | Equal primary sort values | Ordered by `serialNumber ASC` tie-breaker |
 | `PUT` body serial differs only by case | `400`; original row unchanged |
 | `PUT` targets missing pricing | `404`; no upsert |
-| Concurrent create of one serial | One insert; loser receives stable `409` |
 | Calculation-shaped path or payload | Unmapped or unknown-property error; no calculation |
 | Flyway checksum mismatch or Pricing schema unavailable | Startup fails |
 | Another service schema exists | Pricing migration leaves it unchanged |
@@ -610,7 +628,6 @@ uses strict shell mode, bounded polling, a cleanup trap, and never prints secret
 
 | Acceptance criteria | Design coverage |
 | --- | --- |
-| AC1.1-AC1.4 | §2.3, §3.1, §4.3-§4.4, §5.1-§5.3, §6 |
 | AC2.1-AC2.2 | §3.2, §4.3, §6 |
 | AC3.1-AC3.5 | §2.3, §3.3, §4.3, §5.1, §12 |
 | AC4.1-AC4.5 | §3.4, §4.4, §5.1-§5.3, §12 |

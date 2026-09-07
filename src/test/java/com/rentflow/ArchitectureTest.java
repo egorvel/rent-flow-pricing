@@ -72,7 +72,7 @@ class ArchitectureTest {
                 .whereLayer("Model")
                 .mayNotAccessAnyLayer()
                 .whereLayer("Config")
-                .mayOnlyAccessLayers("Dto")
+                .mayOnlyAccessLayers("Dto", "Service")
                 .whereLayer("Util")
                 .mayNotAccessAnyLayer()
                 .check(PRODUCTION_CLASSES);

@@ -21,12 +21,17 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.test.annotation.DirtiesContext;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.test.web.servlet.ResultActions;
 
 import com.rentflow.model.Pricing;
 import com.rentflow.repository.PricingRepository;
+import com.rentflow.service.InvalidInventoryReferenceException;
+import com.rentflow.service.InventoryGateway;
+import com.rentflow.service.InventoryServiceResponseException;
+import com.rentflow.service.InventoryServiceUnavailableException;
 import com.rentflow.support.PostgresIntegrationTest;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -34,6 +39,8 @@ import static org.hamcrest.Matchers.aMapWithSize;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.hasSize;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
@@ -57,9 +64,13 @@ class PricingIT extends PostgresIntegrationTest {
     @Autowired
     private PricingRepository repository;
 
+    @MockitoBean
+    private InventoryGateway inventoryGateway;
+
     @BeforeEach
     void clearPricing() {
         repository.deleteAllInBatch();
+        when(inventoryGateway.exists(anyString())).thenReturn(true);
     }
 
     @Test
@@ -280,6 +291,81 @@ class PricingIT extends PostgresIntegrationTest {
 
         assertThat(repository.findById(CONFLICT_SERIAL).orElseThrow().getPrice())
                 .isEqualByComparingTo("125.50");
+    }
+
+    @Test
+    void mapsAMissingInventoryItemToUnprocessableContent() throws Exception {
+        when(inventoryGateway.exists("MISSING")).thenReturn(false);
+
+        expectProblem(
+                mockMvc.perform(post("/api/v1/pricing")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(validRequest("MISSING"))),
+                HttpStatus.UNPROCESSABLE_CONTENT,
+                "urn:rentflow:problem:inventory-item-not-found",
+                "Inventory item not found",
+                "Inventory item 'MISSING' was not found.",
+                "/api/v1/pricing",
+                "INVENTORY_ITEM_NOT_FOUND");
+
+        assertThat(repository.count()).isZero();
+    }
+
+    @Test
+    void mapsAnInventoryBadRequestToBadRequest() throws Exception {
+        when(inventoryGateway.exists("DRILL-001"))
+                .thenThrow(new InvalidInventoryReferenceException("DRILL-001", new IllegalArgumentException()));
+
+        expectProblem(
+                mockMvc.perform(post("/api/v1/pricing")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(validRequest("DRILL-001"))),
+                HttpStatus.BAD_REQUEST,
+                "urn:rentflow:problem:invalid-inventory-reference",
+                "Invalid inventory reference",
+                "Inventory rejected serial number 'DRILL-001' as invalid.",
+                "/api/v1/pricing",
+                "INVALID_INVENTORY_REFERENCE");
+
+        assertThat(repository.count()).isZero();
+    }
+
+    @Test
+    void mapsOtherInventoryClientResponsesToBadGateway() throws Exception {
+        when(inventoryGateway.exists("DRILL-001"))
+                .thenThrow(new InventoryServiceResponseException("DRILL-001", new IllegalArgumentException()));
+
+        expectProblem(
+                mockMvc.perform(post("/api/v1/pricing")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(validRequest("DRILL-001"))),
+                HttpStatus.BAD_GATEWAY,
+                "urn:rentflow:problem:inventory-service-error",
+                "Inventory service error",
+                "Inventory service returned an unexpected response.",
+                "/api/v1/pricing",
+                "INVENTORY_SERVICE_ERROR");
+
+        assertThat(repository.count()).isZero();
+    }
+
+    @Test
+    void mapsInventoryAvailabilityFailuresToServiceUnavailable() throws Exception {
+        when(inventoryGateway.exists("DRILL-001"))
+                .thenThrow(new InventoryServiceUnavailableException("DRILL-001", new IllegalStateException()));
+
+        expectProblem(
+                mockMvc.perform(post("/api/v1/pricing")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(validRequest("DRILL-001"))),
+                HttpStatus.SERVICE_UNAVAILABLE,
+                "urn:rentflow:problem:inventory-service-unavailable",
+                "Inventory service unavailable",
+                "Inventory service is temporarily unavailable.",
+                "/api/v1/pricing",
+                "INVENTORY_SERVICE_UNAVAILABLE");
+
+        assertThat(repository.count()).isZero();
     }
 
     @Test
