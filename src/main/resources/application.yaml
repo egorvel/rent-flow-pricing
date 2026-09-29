@@ -1,6 +1,21 @@
 spring:
   application:
     name: rent-flow-pricing
+  cache:
+    type: redis
+    cache-names: pricingBySerial
+    redis:
+      time-to-live: ${PRICING_CACHE_TTL:1h}
+      cache-null-values: false
+      enable-statistics: true
+      use-key-prefix: true
+      key-prefix: "rentflow:pricing:v1:"
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      connect-timeout: ${REDIS_CONNECT_TIMEOUT:500ms}
+      timeout: ${REDIS_COMMAND_TIMEOUT:200ms}
   jackson:
     deserialization:
       accept-float-as-int: false

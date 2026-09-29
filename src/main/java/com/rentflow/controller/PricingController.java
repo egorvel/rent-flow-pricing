@@ -190,6 +190,58 @@ public class PricingController {
         return converter.toResponse(service.get(serialNumber));
     }
 
+    @Operation(
+            operationId = "getCachedPricing",
+            summary = "Retrieve cached pricing",
+            description = "May return a Redis-cached representation within the configured freshness window.")
+    @ApiResponses({
+        @ApiResponse(
+                responseCode = "200",
+                description = "Pricing found.",
+                content =
+                        @Content(
+                                mediaType = MediaType.APPLICATION_JSON_VALUE,
+                                schema = @Schema(implementation = PricingDTO.class))),
+        @ApiResponse(
+                responseCode = "400",
+                description = "The serial-number path value is invalid.",
+                content =
+                        @Content(
+                                mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
+                                schema = @Schema(implementation = ProblemResponse.class))),
+        @ApiResponse(
+                responseCode = "404",
+                description = "Pricing does not exist.",
+                content =
+                        @Content(
+                                mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
+                                schema = @Schema(implementation = ProblemResponse.class))),
+        @ApiResponse(
+                responseCode = "406",
+                description = "No acceptable response representation is available.",
+                content =
+                        @Content(
+                                mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
+                                schema = @Schema(implementation = ProblemResponse.class))),
+        @ApiResponse(
+                responseCode = "500",
+                description = "An unexpected server error occurred.",
+                content =
+                        @Content(
+                                mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
+                                schema = @Schema(implementation = ProblemResponse.class)))
+    })
+    @GetMapping("/{serialNumber}/cached")
+    public PricingDTO getCachedPricing(
+            @Parameter(
+                            description = "Case-sensitive equipment serial number.",
+                            required = true,
+                            schema = @Schema(minLength = 1, maxLength = 64, pattern = PricingDTO.SERIAL_NUMBER_PATTERN))
+                    @PathVariable
+                    @Pattern(regexp = PricingDTO.SERIAL_NUMBER_PATTERN, message = "must be a valid serial number") String serialNumber) {
+        return converter.toResponse(service.getCached(serialNumber));
+    }
+
     @Operation(operationId = "replacePricing", summary = "Fully replace pricing")
     @ApiResponses({
         @ApiResponse(

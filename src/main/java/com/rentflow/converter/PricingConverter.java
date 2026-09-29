@@ -4,6 +4,7 @@ import org.springframework.stereotype.Component;
 
 import com.rentflow.dto.PricingDTO;
 import com.rentflow.model.Pricing;
+import com.rentflow.model.PricingCacheEntry;
 
 @Component
 public class PricingConverter {
@@ -16,6 +17,16 @@ public class PricingConverter {
                 pricing.getLongRentalCondition(),
                 pricing.getLongRentalDiscount(),
                 pricing.getDeposit());
+    }
+
+    public PricingDTO toResponse(PricingCacheEntry entry) {
+        return new PricingDTO(
+                entry.serialNumber(),
+                entry.price(),
+                entry.weekendRate(),
+                entry.longRentalCondition(),
+                entry.longRentalDiscount(),
+                entry.deposit());
     }
 
     public Pricing toModel(PricingDTO dto) {

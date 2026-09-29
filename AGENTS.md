@@ -61,6 +61,10 @@ Pricing service. Calculates rental price based on the daily price, discount, dep
 - Use Mockito for mocks.
 - Integration tests with Testcontainers (real DBs).
 - ArchUnit layer boundary test based on the **Layout**.
+- Keep this repository's container smoke test basic: start Pricing with its local PostgreSQL and
+  Redis dependencies, then check health and read-only Pricing endpoints. Cross-service workflows,
+  including Inventory-backed creation, are tested in the Common repository; do not add service
+  fixtures to this repository's Compose stack for smoke testing.
 
 **Layout**
 - Java configs: : `src/main/java/com/rentflow/config`

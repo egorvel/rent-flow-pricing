@@ -19,6 +19,17 @@ services:
       retries: 10
       start_period: 10s
 
+  rentflow-redis:
+    image: redis:8.10.2-alpine
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: redis-cli ping
+      interval: 2s
+      timeout: 2s
+      retries: 10
+      start_period: 2s
+
   pricing:
     build:
       context: .
@@ -27,6 +38,12 @@ services:
       SPRING_DATASOURCE_URL: jdbc:postgresql://rentflow-postgres:5432/${POSTGRES_DB:-rentflow}
       SPRING_DATASOURCE_USERNAME: ${PRICING_DB_USER:-pricing}
       SPRING_DATASOURCE_PASSWORD: ${PRICING_DB_PASSWORD:-pricing-local}
+      INVENTORY_BASE_URL: ${INVENTORY_BASE_URL:-http://inventory}
+      REDIS_HOST: rentflow-redis
+      REDIS_PORT: 6379
+      REDIS_CONNECT_TIMEOUT: ${REDIS_CONNECT_TIMEOUT:-500ms}
+      REDIS_COMMAND_TIMEOUT: ${REDIS_COMMAND_TIMEOUT:-200ms}
+      PRICING_CACHE_TTL: ${PRICING_CACHE_TTL:-1h}
     depends_on:
       rentflow-postgres:
         condition: service_healthy

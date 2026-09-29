@@ -3,6 +3,7 @@ package com.rentflow.service;
 import java.util.ArrayList;
 import java.util.List;
 
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
@@ -11,6 +12,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import com.rentflow.model.Pricing;
+import com.rentflow.model.PricingCacheEntry;
 import com.rentflow.repository.PricingRepository;
 
 @Service
@@ -18,10 +20,18 @@ public class PricingService {
 
     private final PricingRepository repository;
     private final InventoryGateway inventoryGateway;
+    private final PricingCacheService cacheService;
+    private final ApplicationEventPublisher eventPublisher;
 
-    public PricingService(PricingRepository repository, InventoryGateway inventoryGateway) {
+    public PricingService(
+            PricingRepository repository,
+            InventoryGateway inventoryGateway,
+            PricingCacheService cacheService,
+            ApplicationEventPublisher eventPublisher) {
         this.repository = repository;
         this.inventoryGateway = inventoryGateway;
+        this.cacheService = cacheService;
+        this.eventPublisher = eventPublisher;
     }
 
     public Pricing create(Pricing pricing) {
@@ -32,7 +42,9 @@ public class PricingService {
             throw new InventoryItemNotFoundException(pricing.getSerialNumber());
         }
         try {
-            return repository.saveAndFlush(pricing);
+            Pricing created = repository.saveAndFlush(pricing);
+            publishChange(created.getSerialNumber());
+            return created;
         } catch (DataIntegrityViolationException exception) {
             throw new PricingAlreadyExistsException(pricing.getSerialNumber());
         }
@@ -41,6 +53,10 @@ public class PricingService {
     @Transactional(readOnly = true)
     public Pricing get(String serialNumber) {
         return repository.findById(serialNumber).orElseThrow(() -> new PricingNotFoundException(serialNumber));
+    }
+
+    public PricingCacheEntry getCached(String serialNumber) {
+        return cacheService.get(serialNumber);
     }
 
     @Transactional(readOnly = true)
@@ -59,6 +75,7 @@ public class PricingService {
                 .findById(replacement.getSerialNumber())
                 .orElseThrow(() -> new PricingNotFoundException(replacement.getSerialNumber()));
         pricing.replaceDetails(replacement);
+        publishChange(pricing.getSerialNumber());
         return pricing;
     }
 
@@ -67,5 +84,10 @@ public class PricingService {
         Pricing pricing =
                 repository.findById(serialNumber).orElseThrow(() -> new PricingNotFoundException(serialNumber));
         repository.delete(pricing);
+        publishChange(serialNumber);
+    }
+
+    private void publishChange(String serialNumber) {
+        eventPublisher.publishEvent(new PricingChangedEvent(serialNumber));
     }
 }

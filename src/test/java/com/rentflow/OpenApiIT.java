@@ -72,14 +72,16 @@ class OpenApiIT extends PostgresIntegrationTest {
     }
 
     @Test
-    void exposesOnlyTheFiveUnauthenticatedPricingOperations() {
+    void exposesOnlyTheSixUnauthenticatedPricingOperations() {
         assertThat(document.path("openapi").asString()).startsWith("3.");
         assertThat(document.at("/info/title").asString()).isEqualTo("RentFlow Pricing API");
         assertThat(document.at("/info/version").asString()).isEqualTo("v1");
         assertThat(document.path("tags").get(0).path("name").asString()).isEqualTo("Pricing");
 
         JsonNode paths = document.path("paths");
-        assertThat(names(paths)).containsExactlyInAnyOrder("/api/v1/pricing", "/api/v1/pricing/{serialNumber}");
+        assertThat(names(paths))
+                .containsExactlyInAnyOrder(
+                        "/api/v1/pricing", "/api/v1/pricing/{serialNumber}", "/api/v1/pricing/{serialNumber}/cached");
         assertThat(operation("/api/v1/pricing", "post").path("operationId").asString())
                 .isEqualTo("createPricing");
         assertThat(operation("/api/v1/pricing", "get").path("operationId").asString())
@@ -88,6 +90,10 @@ class OpenApiIT extends PostgresIntegrationTest {
                         .path("operationId")
                         .asString())
                 .isEqualTo("getPricing");
+        assertThat(operation("/api/v1/pricing/{serialNumber}/cached", "get")
+                        .path("operationId")
+                        .asString())
+                .isEqualTo("getCachedPricing");
         assertThat(operation("/api/v1/pricing/{serialNumber}", "put")
                         .path("operationId")
                         .asString())
@@ -98,6 +104,8 @@ class OpenApiIT extends PostgresIntegrationTest {
                 .isEqualTo("deletePricing");
         assertThat(paths.path("/api/v1/pricing").has("patch")).isFalse();
         assertThat(paths.path("/api/v1/pricing/{serialNumber}").has("patch")).isFalse();
+        assertThat(paths.path("/api/v1/pricing/{serialNumber}/cached").has("patch"))
+                .isFalse();
         assertThat(names(paths))
                 .noneMatch(path -> path.startsWith("/actuator") || path.equals("/livez") || path.equals("/readyz"));
 
@@ -170,6 +178,13 @@ class OpenApiIT extends PostgresIntegrationTest {
             assertThat(resolved(serialParameter.path("schema")).path("pattern").asString())
                     .isEqualTo(PricingDTO.SERIAL_NUMBER_PATTERN);
         }
+        JsonNode cachedSerialParameter =
+                parameter(operation("/api/v1/pricing/{serialNumber}/cached", "get"), "serialNumber");
+        assertThat(cachedSerialParameter.path("required").asBoolean()).isTrue();
+        assertThat(resolved(cachedSerialParameter.path("schema"))
+                        .path("pattern")
+                        .asString())
+                .isEqualTo(PricingDTO.SERIAL_NUMBER_PATTERN);
 
         assertRequestBodySchema(operation("/api/v1/pricing", "post"), "PricingDTO");
         assertRequestBodySchema(operation("/api/v1/pricing/{serialNumber}", "put"), "PricingDTO");
@@ -192,6 +207,10 @@ class OpenApiIT extends PostgresIntegrationTest {
         assertResponseCodes(get, "200", "400", "404", "406", "500");
         assertResponseSchema(get, "200", MediaType.APPLICATION_JSON_VALUE, "PricingDTO");
 
+        JsonNode cachedGet = operation("/api/v1/pricing/{serialNumber}/cached", "get");
+        assertResponseCodes(cachedGet, "200", "400", "404", "406", "500");
+        assertResponseSchema(cachedGet, "200", MediaType.APPLICATION_JSON_VALUE, "PricingDTO");
+
         JsonNode replace = operation("/api/v1/pricing/{serialNumber}", "put");
         assertResponseCodes(replace, "200", "400", "404", "406", "415", "500");
         assertResponseSchema(replace, "200", MediaType.APPLICATION_JSON_VALUE, "PricingDTO");
@@ -203,6 +222,7 @@ class OpenApiIT extends PostgresIntegrationTest {
         assertProblemSchemas(create, Set.of("400", "406", "409", "415", "422", "500", "502", "503"));
         assertProblemSchemas(list, Set.of("400", "406", "500"));
         assertProblemSchemas(get, Set.of("400", "404", "406", "500"));
+        assertProblemSchemas(cachedGet, Set.of("400", "404", "406", "500"));
         assertProblemSchemas(replace, Set.of("400", "404", "406", "415", "500"));
         assertProblemSchemas(delete, Set.of("400", "404", "500"));
     }

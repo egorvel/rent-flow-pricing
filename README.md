@@ -21,8 +21,9 @@ permanent deletion. Rental-total calculation is intentionally outside this first
 - `curl` for the examples and container smoke test.
 - Maven 3.9.x is optional because Maven Wrapper 3.3.4 is included and pinned to Maven 3.9.16.
 
-Ports `8080` and `5432` must be available for the default local stack. Set `POSTGRES_PORT` before
-starting Compose if the host PostgreSQL port must differ.
+Ports `8081`, `5432`, and `6379` must be available for the default local stack. Set
+`PRICING_PORT`, `POSTGRES_PORT`, or `REDIS_PORT` before starting Compose if a host port must
+differ. PostgreSQL and Redis bind only to the host loopback interface.
 
 ## Build
 
@@ -42,11 +43,11 @@ The executable application is produced at `target/pricing.jar`.
 
 ## Run Locally
 
-Start only the local PostgreSQL dependency:
+Start the local PostgreSQL and Redis dependencies:
 
 ```bash
-docker compose up --detach --wait rentflow-postgres
-docker compose ps rentflow-postgres
+docker compose up --detach --wait rentflow-postgres rentflow-redis
+docker compose ps rentflow-postgres rentflow-redis
 ```
 
 Then run the application on the host with the Pricing role:
@@ -61,7 +62,7 @@ export SPRING_DATASOURCE_PASSWORD='pricing-local'
 These are development-only defaults from `compose.yaml`. If `POSTGRES_PORT` is overridden, use the
 same port in `SPRING_DATASOURCE_URL`.
 
-Stop PostgreSQL while preserving its volume:
+Stop the dependencies while preserving the PostgreSQL volume:
 
 ```bash
 docker compose down
@@ -69,12 +70,12 @@ docker compose down
 
 ## Run With Docker Compose
 
-Build and start the application and database:
+Build and start Pricing with local PostgreSQL and Redis:
 
 ```bash
 docker compose up --build --detach --wait
 docker compose ps
-curl --fail --silent --show-error http://localhost:8080/readyz
+curl --fail --silent --show-error http://localhost:8081/readyz
 ```
 
 Follow application logs:
@@ -128,12 +129,23 @@ The application contains no datasource URL or credentials. Supply standard Sprin
 | `SPRING_DATASOURCE_URL` | Yes | JDBC URL for the shared `rentflow` database |
 | `SPRING_DATASOURCE_USERNAME` | Yes | Pricing-owned login role |
 | `SPRING_DATASOURCE_PASSWORD` | Yes | Password for the Pricing role |
+| `INVENTORY_BASE_URL` | For creation | URL of a reachable Inventory service; defaults to `http://inventory` |
+| `REDIS_HOST` | No | Redis host; defaults to `localhost` |
+| `REDIS_PORT` | No | Redis port; defaults to `6379` |
+| `REDIS_CONNECT_TIMEOUT` | No | Redis connection timeout; defaults to `500ms` |
+| `REDIS_COMMAND_TIMEOUT` | No | Redis command timeout; defaults to `200ms` |
+| `PRICING_CACHE_TTL` | No | Fixed positive-entry TTL; defaults to `1h` |
 | `SERVER_PORT` | No | HTTP port; defaults to `8080` |
 | `JAVA_TOOL_OPTIONS` | No | JVM runtime options |
 
 The Compose bootstrap also accepts `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`,
-`PRICING_DB_USER`, `PRICING_DB_PASSWORD`, and `POSTGRES_PORT`. PostgreSQL is published only on the
-host loopback interface.
+`PRICING_DB_USER`, `PRICING_DB_PASSWORD`, `POSTGRES_PORT`, `PRICING_PORT`, and `REDIS_PORT`.
+Inside Compose, Pricing always reaches Redis at `rentflow-redis:6379`; the `REDIS_PORT` Compose
+override changes only the optional loopback publication used for local inspection. The local
+Redis instance is unauthenticated and disposable and is not a production topology.
+This repository's Compose stack does not start Inventory. To create pricing through that stack,
+set `INVENTORY_BASE_URL` to an Inventory address reachable from the Pricing container. Cross-service
+smoke testing is maintained in the Common repository.
 
 ## Database Migrations
 
@@ -152,27 +164,67 @@ With the service running:
 
 | Resource | URL |
 | --- | --- |
-| Pricing API | `http://localhost:8080/api/v1/pricing` |
-| Swagger UI | `http://localhost:8080/swagger-ui.html` |
-| OpenAPI JSON | `http://localhost:8080/v3/api-docs` |
-| Liveness | `http://localhost:8080/livez` |
-| Actuator liveness | `http://localhost:8080/actuator/health/liveness` |
-| Readiness | `http://localhost:8080/readyz` |
-| Actuator readiness | `http://localhost:8080/actuator/health/readiness` |
+| Pricing API | `http://localhost:8081/api/v1/pricing` |
+| Swagger UI | `http://localhost:8081/swagger-ui.html` |
+| OpenAPI JSON | `http://localhost:8081/v3/api-docs` |
+| Liveness | `http://localhost:8081/livez` |
+| Actuator liveness | `http://localhost:8081/actuator/health/liveness` |
+| Readiness | `http://localhost:8081/readyz` |
+| Actuator readiness | `http://localhost:8081/actuator/health/readiness` |
 
 Actuator exposes only health and hides component details. Liveness is independent of PostgreSQL;
-readiness returns HTTP `503` when the database is unavailable.
+readiness returns HTTP `503` when the database is unavailable. Redis is excluded from both probe
+groups, so the service can start and remain ready while Redis is unavailable as long as
+PostgreSQL is healthy.
 
 API errors use RFC 9457 Problem Details with `application/problem+json`, stable `type` and `code`
 values, and sorted field violations for validation failures.
 
+## Authoritative and Cached Retrieval
+
+Pricing provides two retrieval choices for the same response contract:
+
+- `GET /api/v1/pricing/{serialNumber}` always reads PostgreSQL. Use it when the caller must see
+  the latest committed value.
+- `GET /api/v1/pricing/{serialNumber}/cached` uses Redis cache-aside. Use it for frequent reads
+  where bounded staleness is acceptable.
+
+The cached endpoint stores only successful pricing lookups. Missing serial numbers are not
+cached, so each `404` is checked against PostgreSQL. A cached value has a fixed, non-renewing TTL:
+the default is one hour, configured with `PRICING_CACHE_TTL`, and cache hits do not extend it.
+Both endpoints return the same `PricingDTO` or Problem Details and expose no cache-source field,
+`X-Cache`, or `Age` header.
+
+Successful create, replace, and delete operations evict only the affected key after the database
+commit. Direct SQL changes, an eviction failure, a process failure after commit, or a cache fill
+that overlaps a mutation can still leave an older value until its TTL expires. The authoritative
+endpoint is the strict-freshness escape hatch for those cases.
+
+Redis is an optional accelerator, not a source of truth. A Redis read, write, or eviction failure
+is recorded and fails open; cached retrieval falls back to PostgreSQL, mutation results remain
+unchanged, and readiness continues to depend on PostgreSQL rather than Redis. Short connection
+and command timeouts bound this fallback cost.
+
+Inspect the exact local key and remaining TTL after requesting an existing `DRILL-001` through the
+cached endpoint:
+
+```bash
+docker compose exec rentflow-redis \
+  redis-cli --raw GET 'rentflow:pricing:v1:pricingBySerial::DRILL-001'
+docker compose exec rentflow-redis \
+  redis-cli --raw TTL 'rentflow:pricing:v1:pricingBySerial::DRILL-001'
+```
+
+Redis has no persistence volume in the local stack; cache entries are expected to disappear when
+its container is recreated.
+
 ## API Examples
 
-Create pricing:
+With a reachable Inventory service that contains `DRILL-001`, create pricing for that item:
 
 ```bash
 curl --fail-with-body --include \
-  --request POST 'http://localhost:8080/api/v1/pricing' \
+  --request POST 'http://localhost:8081/api/v1/pricing' \
   --header 'Content-Type: application/json' \
   --data '{
     "serialNumber": "DRILL-001",
@@ -184,11 +236,18 @@ curl --fail-with-body --include \
   }'
 ```
 
-Retrieve it by its case-sensitive serial number:
+Retrieve it authoritatively by its case-sensitive serial number:
 
 ```bash
 curl --fail-with-body \
-  'http://localhost:8080/api/v1/pricing/DRILL-001'
+  'http://localhost:8081/api/v1/pricing/DRILL-001'
+```
+
+Retrieve it through the one-hour cache for a high-volume read path:
+
+```bash
+curl --fail-with-body \
+  'http://localhost:8081/api/v1/pricing/DRILL-001/cached'
 ```
 
 Request the first ten resources ordered by descending daily price. Non-serial sorts use
@@ -196,14 +255,14 @@ Request the first ten resources ordered by descending daily price. Non-serial so
 
 ```bash
 curl --fail-with-body \
-  'http://localhost:8080/api/v1/pricing?page=0&size=10&sort=price&direction=desc'
+  'http://localhost:8081/api/v1/pricing?page=0&size=10&sort=price&direction=desc'
 ```
 
 Fully replace its mutable pricing terms. The body serial number must exactly match the path:
 
 ```bash
 curl --fail-with-body \
-  --request PUT 'http://localhost:8080/api/v1/pricing/DRILL-001' \
+  --request PUT 'http://localhost:8081/api/v1/pricing/DRILL-001' \
   --header 'Content-Type: application/json' \
   --data '{
     "serialNumber": "DRILL-001",
@@ -222,7 +281,7 @@ curl --fail-with-body \
   --request DELETE \
   --output /dev/null \
   --write-out '%{http_code}\n' \
-  'http://localhost:8080/api/v1/pricing/DRILL-001'
+  'http://localhost:8081/api/v1/pricing/DRILL-001'
 ```
 
 ## Verification
@@ -251,13 +310,12 @@ If Spotless reports formatting differences, apply the pinned formatter and rerun
 mvn -B -ntp clean verify
 ```
 
-Run the isolated live-container acceptance test with:
+Run the local container smoke test with:
 
 ```bash
 ./scripts/container-smoke-test.sh
 ```
 
-The smoke test builds the production image, verifies restricted role/schema bootstrap and the
-unprivileged runtime, exercises create/retrieve and persistence across restarts, checks independent
-liveness and database-aware readiness during a PostgreSQL outage, and removes its isolated
-containers and volume on exit.
+The smoke test starts Pricing, PostgreSQL, and Redis; checks liveness, readiness, and basic
+read-only Pricing responses; then removes its isolated containers and volume. Cross-service
+creation and persistence workflows are exercised in the Common repository.

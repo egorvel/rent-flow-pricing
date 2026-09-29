@@ -97,6 +97,19 @@ class PricingIT extends PostgresIntegrationTest {
                 .andExpect(jsonPath("$.longRentalCondition").value(7))
                 .andExpect(jsonPath("$.longRentalDiscount").value(0.1000))
                 .andExpect(jsonPath("$.deposit").value(300.00));
+
+        mockMvc.perform(get("/api/v1/pricing/DRILL-001/cached"))
+                .andExpect(status().isOk())
+                .andExpect(content().contentType(MediaType.APPLICATION_JSON))
+                .andExpect(jsonPath("$", aMapWithSize(6)))
+                .andExpect(jsonPath("$.serialNumber").value("DRILL-001"))
+                .andExpect(jsonPath("$.price").value(125.50))
+                .andExpect(jsonPath("$.weekendRate").value(1.2500))
+                .andExpect(jsonPath("$.longRentalCondition").value(7))
+                .andExpect(jsonPath("$.longRentalDiscount").value(0.1000))
+                .andExpect(jsonPath("$.deposit").value(300.00))
+                .andExpect(header().doesNotExist("X-Cache"))
+                .andExpect(header().doesNotExist("Age"));
     }
 
     @Test
@@ -114,6 +127,12 @@ class PricingIT extends PostgresIntegrationTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.price").value(100.00));
         mockMvc.perform(get("/api/v1/pricing/drill-001"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.price").value(200.00));
+        mockMvc.perform(get("/api/v1/pricing/DRILL-001/cached"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.price").value(100.00));
+        mockMvc.perform(get("/api/v1/pricing/drill-001/cached"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.price").value(200.00));
     }
@@ -183,6 +202,10 @@ class PricingIT extends PostgresIntegrationTest {
     void rejectsInvalidAndMissingSerialNumbers() throws Exception {
         expectValidation(mockMvc.perform(get(URI.create("/api/v1/pricing/%20bad%20"))), "/api/v1/pricing/%20bad%20")
                 .andExpect(jsonPath("$.violations[0].field").value("serialNumber"));
+        expectValidation(
+                        mockMvc.perform(get(URI.create("/api/v1/pricing/%20bad%20/cached"))),
+                        "/api/v1/pricing/%20bad%20/cached")
+                .andExpect(jsonPath("$.violations[0].field").value("serialNumber"));
 
         expectProblem(
                 mockMvc.perform(get("/api/v1/pricing/MISSING")),
@@ -192,6 +215,26 @@ class PricingIT extends PostgresIntegrationTest {
                 "Pricing for serial number 'MISSING' was not found.",
                 "/api/v1/pricing/MISSING",
                 "PRICING_NOT_FOUND");
+        expectProblem(
+                mockMvc.perform(get("/api/v1/pricing/MISSING/cached")),
+                HttpStatus.NOT_FOUND,
+                "urn:rentflow:problem:pricing-not-found",
+                "Pricing not found",
+                "Pricing for serial number 'MISSING' was not found.",
+                "/api/v1/pricing/MISSING/cached",
+                "PRICING_NOT_FOUND");
+    }
+
+    @Test
+    void keepsCachedAsAValidAuthoritativeSerialNumber() throws Exception {
+        repository.saveAndFlush(pricing("cached", "125.50", "1.2500", 7, "0.1000", "300.00"));
+
+        mockMvc.perform(get("/api/v1/pricing/cached"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.serialNumber").value("cached"));
+        mockMvc.perform(get("/api/v1/pricing/cached/cached"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.serialNumber").value("cached"));
     }
 
     @Test
@@ -493,6 +536,14 @@ class PricingIT extends PostgresIntegrationTest {
                 "No acceptable response representation is available.",
                 "/api/v1/pricing",
                 "NOT_ACCEPTABLE");
+        expectProblem(
+                mockMvc.perform(get("/api/v1/pricing/DRILL-001/cached").accept(MediaType.TEXT_PLAIN)),
+                HttpStatus.NOT_ACCEPTABLE,
+                "urn:rentflow:problem:not-acceptable",
+                "Not acceptable",
+                "No acceptable response representation is available.",
+                "/api/v1/pricing/DRILL-001/cached",
+                "NOT_ACCEPTABLE");
 
         MvcResult patchResult = expectProblem(
                         mockMvc.perform(patch("/api/v1/pricing/DRILL-001")
@@ -545,6 +596,7 @@ class PricingIT extends PostgresIntegrationTest {
                 .andExpect(status().isCreated());
         mockMvc.perform(get("/api/v1/pricing")).andExpect(status().isOk());
         mockMvc.perform(get("/api/v1/pricing/NOAUTH-001")).andExpect(status().isOk());
+        mockMvc.perform(get("/api/v1/pricing/NOAUTH-001/cached")).andExpect(status().isOk());
         mockMvc.perform(put("/api/v1/pricing/NOAUTH-001")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(request("NOAUTH-001", "150.00", "1.5000", 14, "0.2500", "450.00")))
