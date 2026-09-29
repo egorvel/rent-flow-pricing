@@ -43,6 +43,9 @@ Pricing service. Calculates rental price based on the daily price, discount, dep
 - Testcontainers
 
 **Persistence conventions:**
+- For repository queries, prefer Spring Data JPA derived query methods first, use JPQL `@Query`
+  when derivation cannot express the query clearly, and use native SQL only when required for
+  database-specific behavior or semantics that cannot be expressed safely with JPQL.
 - The `rentflow` database, `pricing` login role, and role-owned `pricing` schema are
   platform-provisioned prerequisites; the local Compose bootstrap may provide them for
   development.
