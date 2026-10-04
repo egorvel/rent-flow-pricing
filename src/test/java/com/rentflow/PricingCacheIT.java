@@ -2,18 +2,17 @@ package com.rentflow;
 
 import java.math.BigDecimal;
 import java.time.Duration;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import jakarta.persistence.EntityManager;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.cache.CacheManager;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Import;
 import org.springframework.data.redis.cache.CacheStatistics;
 import org.springframework.data.redis.cache.RedisCache;
 import org.springframework.data.redis.core.RedisCallback;
@@ -26,8 +25,8 @@ import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
-import org.springframework.transaction.event.TransactionPhase;
-import org.springframework.transaction.event.TransactionalEventListener;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.utility.DockerImageName;
@@ -36,7 +35,6 @@ import com.rentflow.model.Pricing;
 import com.rentflow.repository.PricingRepository;
 import com.rentflow.service.InventoryGateway;
 import com.rentflow.service.PricingCacheService;
-import com.rentflow.service.PricingChangedEvent;
 import com.rentflow.support.PostgresIntegrationTest;
 
 import io.micrometer.core.instrument.MeterRegistry;
@@ -46,6 +44,7 @@ import tools.jackson.databind.ObjectMapper;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.aMapWithSize;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.times;
@@ -62,7 +61,6 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 @SpringBootTest
 @AutoConfigureMockMvc
-@Import(PricingCacheIT.RollbackTestConfiguration.class)
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 class PricingCacheIT extends PostgresIntegrationTest {
 
@@ -86,6 +84,9 @@ class PricingCacheIT extends PostgresIntegrationTest {
 
     @Autowired
     private MeterRegistry meterRegistry;
+
+    @Autowired
+    private EntityManager entityManager;
 
     @MockitoSpyBean
     private PricingRepository repository;
@@ -279,6 +280,24 @@ class PricingCacheIT extends PostgresIntegrationTest {
         warm("ROLLBACK-REPLACE");
         warm("ROLLBACK-DELETE");
 
+        doAnswer(invocation -> {
+                    String serialNumber = invocation.getArgument(0);
+                    Pricing persisted = entityManager.find(Pricing.class, serialNumber);
+                    if (serialNumber.startsWith("ROLLBACK-")) {
+                        assertThat(TransactionSynchronizationManager.isSynchronizationActive())
+                                .isTrue();
+                        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                            @Override
+                            public void beforeCommit(boolean readOnly) {
+                                throw new IllegalStateException("forced rollback");
+                            }
+                        });
+                    }
+                    return Optional.ofNullable(persisted);
+                })
+                .when(repository)
+                .findById(anyString());
+
         mockMvc.perform(put("/api/v1/pricing/ROLLBACK-REPLACE")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(request("ROLLBACK-REPLACE", "200.00")))
@@ -287,6 +306,7 @@ class PricingCacheIT extends PostgresIntegrationTest {
 
         assertThat(redisTemplate.hasKey(cacheKey("ROLLBACK-REPLACE"))).isTrue();
         assertThat(redisTemplate.hasKey(cacheKey("ROLLBACK-DELETE"))).isTrue();
+        reset(repository);
         mockMvc.perform(get("/api/v1/pricing/ROLLBACK-REPLACE/cached"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.price").value(100.00));
@@ -345,24 +365,5 @@ class PricingCacheIT extends PostgresIntegrationTest {
 
     private Set<String> fieldNames(JsonNode node) {
         return node.propertyStream().map(entry -> entry.getKey()).collect(java.util.stream.Collectors.toSet());
-    }
-
-    @TestConfiguration(proxyBeanMethods = false)
-    static class RollbackTestConfiguration {
-
-        @Bean
-        MutationRollbackListener mutationRollbackListener() {
-            return new MutationRollbackListener();
-        }
-    }
-
-    static class MutationRollbackListener {
-
-        @TransactionalEventListener(phase = TransactionPhase.BEFORE_COMMIT)
-        void failSelectedMutations(PricingChangedEvent event) {
-            if (event.serialNumber().startsWith("ROLLBACK-")) {
-                throw new IllegalStateException("forced rollback");
-            }
-        }
     }
 }

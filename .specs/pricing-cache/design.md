@@ -35,19 +35,18 @@ The implementation extends the existing packages without adding a new applicatio
 | --- | --- | --- |
 | `com.rentflow.controller` | `PricingController` | Bind and document cached retrieval |
 | `com.rentflow.converter` | `PricingConverter` | Map both authoritative entities and cache entries to the shared `PricingDTO` response |
-| `com.rentflow.service` | `PricingService` | Keep authoritative reads and publish successful mutation events |
+| `com.rentflow.service` | `PricingService` | Keep authoritative reads and evict the affected key after successful mutations |
 | `com.rentflow.service` | `PricingCacheService` | Execute the proxied cache-aside lookup |
 | `com.rentflow.model` | `PricingCacheEntry` | Immutable Redis payload and conversion boundary |
-| `com.rentflow.service` | `PricingChangedEvent` | Identify a serial number whose authoritative row changed |
-| `com.rentflow.service` | `PricingCacheInvalidationService` | Evict after a committed mutation |
 | `com.rentflow.config` | `RedisCacheConfig`, `PricingCacheErrorHandler` | Configure Redis caching and fail-open errors |
 | `com.rentflow.repository` | `PricingRepository` | Load cache misses from PostgreSQL |
 
 `PricingCacheEntry` is an internal model-layer value, not an HTTP DTO or JPA entity. Converters
 already depend on model types. The config-to-model ArchUnit direction is extended narrowly so
 `RedisCacheConfig` can select the typed serializer; all other layer directions remain unchanged.
-`PricingCacheService` and `PricingCacheInvalidationService` are separate Spring beans because
-proxy-mode cache annotations do not intercept self-invocation.
+`PricingCacheService` remains a separate Spring bean because proxy-mode cache annotations do not
+intercept self-invocation. Mutation methods are called externally through the `PricingService`
+proxy, so their `@CacheEvict` annotations are intercepted directly.
 
 ### 1.3 Runtime dependencies and versions
 
@@ -102,17 +101,16 @@ Mutation invalidation is commit-aware:
 
 ```text
 POST / PUT / DELETE
-  -> existing PricingService mutation
-  -> publish PricingChangedEvent
-  -> PostgreSQL commit
-  -> PricingCacheInvalidationService listener AFTER_COMMIT
+  -> cache advice around PricingService mutation
+  -> existing PricingService mutation and PostgreSQL commit
+  -> successful method return
   -> Redis DEL for the serial-number key
 ```
 
-Create publishes after `saveAndFlush` returns from its repository-managed transaction. Since no
-service transaction is active at publication time, listener fallback execution evicts
-immediately. Replace and delete publish inside their service transaction; their listeners run
-only after commit.
+Create's `saveAndFlush` returns from its repository-managed transaction before the cache advice
+evicts. Replace and delete use service transactions; the explicitly higher-precedence cache
+advice wraps their transaction advice, so eviction follows a successful commit. A failed commit
+does not evict.
 
 ## 2. HTTP contract
 
@@ -360,7 +358,7 @@ The fixed one-hour TTL starts whenever a successful miss result is written. Cach
 renew it. Expiration is enforced by Redis; after expiry the next request follows the miss path.
 
 Pricing API mutations attempt earlier invalidation through §6. Direct SQL changes, another writer
-that does not publish the shared event, failed eviction, or the accepted race in §5.4 can leave a
+that bypasses `PricingService`, failed eviction, or the accepted race in §5.4 can leave a
 value visible until TTL expiry. Consumers requiring the latest committed state use the
 authoritative endpoint.
 
@@ -384,32 +382,34 @@ value only when no cache fill for that serial overlaps the mutation.
 
 ## 6. Mutation invalidation
 
-### 6.1 Transaction-bound event
+### 6.1 Direct method eviction and transaction order
 
-`PricingChangedEvent` contains only `serialNumber`. `PricingService` publishes it after the local
-mutation has reached the point at which the existing operation would otherwise return success:
+The public `PricingService.create`, `replace`, and `delete` methods carry `@CacheEvict` with
+`beforeInvocation = false` (the default). Spring's cache interceptor therefore evicts only when
+the proxied method completes normally. The keys come from the mutation arguments:
 
-| Mutation | Publication point | Transaction state |
+| Mutation | Eviction key | Transaction state at successful method return |
 | --- | --- | --- |
-| Create | After `saveAndFlush` returns | Repository transaction already committed |
-| Replace | After `replaceDetails` | Service transaction active; dirty checking commits later |
-| Delete | After `repository.delete` | Service transaction active; delete commits later |
+| Create | `#pricing.serialNumber` | Repository `saveAndFlush` transaction already committed |
+| Replace | `#replacement.serialNumber` | Service transaction already committed |
+| Delete | `#serialNumber` | Service transaction already committed |
 
-`PricingCacheInvalidationService` handles the event with
-`@TransactionalEventListener(phase = AFTER_COMMIT, fallbackExecution = true)`. `AFTER_COMMIT`
-prevents eviction for rolled-back replace/delete operations. `fallbackExecution = true` handles
-create, whose repository transaction has completed before publication.
+`@EnableCaching(order = Ordered.HIGHEST_PRECEDENCE)` in §4.1 makes cache advice wrap the
+default-order transaction advice on `replace` and `delete`: enter cache advice, begin transaction,
+run mutation, commit, then evict. A rollback or commit exception skips the post-invocation
+eviction. This relies on these HTTP mutations owning their service transaction; a future caller
+that wraps them in a larger transaction must revisit the eviction boundary.
 
 ### 6.2 Eviction operation
 
-The listener method is also annotated:
+Each mutation method uses the same cache name with its argument-specific key:
 
 ```java
-@CacheEvict(cacheNames = PricingCacheService.CACHE_NAME, key = "#event.serialNumber()")
+@CacheEvict(cacheNames = PricingCacheService.CACHE_NAME, key = "#serialNumber")
 ```
 
-The listener is invoked through its Spring bean proxy, so the cache interceptor issues one `DEL`
-after the listener returns normally. Create evicts defensively because a serial number might have
+The service is called through its Spring bean proxy, so the cache interceptor issues one `DEL`
+after a successful proxied invocation. Create evicts defensively because a serial number might have
 a stale legacy entry even though negative results are not cached. Replace and delete remove the
 previous positive entry.
 
@@ -422,7 +422,7 @@ lets the next cached request populate one representation through the same miss p
 committed create, replacement, or deletion retains its existing HTTP status and body. The stale
 entry remains bounded by TTL, while the authoritative endpoint exposes current PostgreSQL state.
 
-The event is local and non-durable. A process crash after PostgreSQL commit but before eviction
+The eviction is local and non-durable. A process crash after PostgreSQL commit but before eviction
 has the same bounded-staleness outcome as a Redis eviction failure. An outbox, Redis transaction,
 two-phase commit, and compensating database write are not introduced because Redis is explicitly
 non-authoritative.
@@ -474,7 +474,8 @@ Unit tests use JUnit, AssertJ, and Mockito without a Spring context:
 | `PricingCacheEntryTest` | Entity-to-entry conversion preserves identity, decimal values, and scale-insensitive value equality; every null component is rejected |
 | `PricingConverterTest` | Direct cache-entry-to-DTO conversion preserves all six fields and matches the authoritative response |
 | `PricingCacheErrorHandlerTest` | Get, put, evict, and clear failures are suppressed and increment only their bounded error counter |
-| `PricingServiceTest` | Authoritative get still uses the repository; cached get delegates; successful mutations publish the exact serial event; failed mutations do not publish |
+| `PricingServiceTest` | Authoritative get still uses the repository; cached get delegates; mutations retain their existing behavior |
+| `PricingCacheEvictionAnnotationsTest` | All three write methods evict only their serial key after successful invocation |
 
 Tests call production methods with explicit Java types and verify collaborators rather than
 starting Spring merely to exercise business orchestration.

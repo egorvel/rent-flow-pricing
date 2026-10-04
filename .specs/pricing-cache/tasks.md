@@ -165,27 +165,25 @@ foundations remain prerequisites.
 
 **Scope.**
 
-- Add the serial-only `PricingChangedEvent` and publish it from successful create, replace, and
-  delete flows at the transaction points defined in `design.md` §6.1.
-- Add `PricingCacheInvalidationService` as a separate proxied bean with an `AFTER_COMMIT`
-  transaction listener, fallback execution for post-repository-transaction create, and one-key
-  `@CacheEvict` behavior.
+- Annotate public `PricingService.create`, `replace`, and `delete` with argument-keyed
+  `@CacheEvict` as defined in `design.md` §6.1; retain highest-precedence cache advice so
+  eviction follows successful repository/service transaction completion.
 - Preserve every existing write status, response body, database transaction, Inventory ordering,
   and error path; writes never update Redis with their response object.
-- Extend no-Spring-context service tests to distinguish successful publication from every failed
-  mutation path. Transactional and Redis-backed timing evidence remains assigned to T4.
+- Remove the event publisher, serial-only event, and event listener. Replace their annotation
+  tests with no-Spring-context checks of the three method annotations. Transactional and
+  Redis-backed timing evidence remains assigned to T4.
 
 **DoD.**
 
-- [ ] `PricingChangedEvent` contains only the exact case-sensitive serial number, and the listener
-  evicts only `pricingBySerial` with `#event.serialNumber()` rather than clearing or scanning the
-  cache (AC3.4).
-- [ ] `PricingServiceTest` proves successful create, replace, and delete publish exactly one event
-  with the affected serial, while missing, rejected, repository-failed, and rolled-back mutations
-  publish no effective invalidation (AC3.4).
-- [ ] Annotation/configuration tests prove replace and delete listeners use `AFTER_COMMIT`, create
-  can use `fallbackExecution = true` after `saveAndFlush`, and no listener evicts before a live
-  mutation transaction commits (AC3.4-AC3.5).
+- [ ] The three `PricingService` mutation annotations use only `pricingBySerial`, derive their
+  exact case-sensitive keys from method arguments, and never clear or scan the cache (AC3.4).
+- [ ] `PricingServiceTest` proves mutations preserve their existing save, replace, delete, and
+  failure behavior without event publication; annotation tests prove eviction occurs only after
+  successful invocation (AC3.4).
+- [ ] Configuration tests prove cache advice has higher precedence than transaction advice;
+  integration tests prove committed create/replace/delete evict and rolled-back or failed
+  mutations do not (AC3.4-AC3.5).
 - [ ] Existing mutation tests continue to prove create, replace, and delete retain their exact
   success and failure contracts, and an eviction exception cannot alter an already committed
   mutation result (AC4.3-AC4.4).
@@ -322,7 +320,7 @@ AC4.1-AC4.4, and AC5.4; `design.md` §3.2-§3.3, §4.2-§4.4, §5,
 | AC2.5 | T2 and T4 response-surface assertions; T5 OpenAPI absence assertion |
 | AC3.1 | T1 TTL configuration checks; T4 live key-TTL assertion |
 | AC3.2-AC3.3 | T4 out-of-band update, unrenewed expiry, and post-expiry reload assertions |
-| AC3.4-AC3.5 | T3 publication/listener checks; T4 after-commit eviction, rollback, and next-read assertions |
+| AC3.4-AC3.5 | T3 method-annotation/advice-order checks; T4 after-commit eviction, rollback, and next-read assertions |
 | AC4.1-AC4.2 | T1 fail-open handler tests; T4 stopped/failed Redis get-and-put outcome assertions |
 | AC4.3 | T3 unchanged mutation contract; T4 committed mutation plus failed-eviction assertions |
 | AC4.4 | T1 health/startup configuration; T4 full endpoint matrix and unused-port startup assertions |
