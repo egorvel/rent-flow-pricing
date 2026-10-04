@@ -1,6 +1,9 @@
 package com.rentflow.controller;
 
 import java.net.URI;
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Set;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
@@ -34,11 +37,13 @@ import com.rentflow.service.PricingSortField;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.headers.Header;
+import io.swagger.v3.oas.annotations.media.ArraySchema;
 import io.swagger.v3.oas.annotations.media.Content;
 import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.responses.ApiResponses;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import tools.jackson.databind.JsonNode;
 
 @RestController
 @Validated
@@ -47,6 +52,7 @@ import io.swagger.v3.oas.annotations.tags.Tag;
 public class PricingController {
 
     public static final String PATH = "/api/v1/pricing";
+    private static final int MAX_BATCH_SIZE = 100;
     private static final Set<String> COLLECTION_PARAMETERS = Set.of("page", "size", "sort", "direction");
 
     private final PricingService service;
@@ -242,6 +248,82 @@ public class PricingController {
         return converter.toResponse(service.getCached(serialNumber));
     }
 
+    @Operation(
+            operationId = "getCachedPricingBatch",
+            summary = "Retrieve cached pricing for a batch",
+            description = "Uses the existing per-serial cache; duplicates are removed in first-occurrence order."
+                    + " Returns the first missing serial as a 404 without a partial list.")
+    @ApiResponses({
+        @ApiResponse(
+                responseCode = "200",
+                description = "Pricing found for every distinct serial number.",
+                content =
+                        @Content(
+                                mediaType = MediaType.APPLICATION_JSON_VALUE,
+                                array = @ArraySchema(schema = @Schema(implementation = PricingDTO.class)))),
+        @ApiResponse(
+                responseCode = "400",
+                description = "The JSON body or a serial number is invalid.",
+                content =
+                        @Content(
+                                mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
+                                schema = @Schema(implementation = ProblemResponse.class))),
+        @ApiResponse(
+                responseCode = "404",
+                description = "Pricing does not exist for the first missing serial number.",
+                content =
+                        @Content(
+                                mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
+                                schema = @Schema(implementation = ProblemResponse.class))),
+        @ApiResponse(
+                responseCode = "406",
+                description = "No acceptable response representation is available.",
+                content =
+                        @Content(
+                                mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
+                                schema = @Schema(implementation = ProblemResponse.class))),
+        @ApiResponse(
+                responseCode = "415",
+                description = "The request media type is unsupported.",
+                content =
+                        @Content(
+                                mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
+                                schema = @Schema(implementation = ProblemResponse.class))),
+        @ApiResponse(
+                responseCode = "500",
+                description = "An unexpected server error occurred.",
+                content =
+                        @Content(
+                                mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
+                                schema = @Schema(implementation = ProblemResponse.class)))
+    })
+    @PostMapping(path = "/batch/cached", consumes = MediaType.APPLICATION_JSON_VALUE)
+    public List<PricingDTO> getCachedPricingBatch(
+            @io.swagger.v3.oas.annotations.parameters.RequestBody(
+                            description = "One to 100 case-sensitive serial numbers as a JSON array.",
+                            required = true,
+                            content =
+                                    @Content(
+                                            mediaType = MediaType.APPLICATION_JSON_VALUE,
+                                            array =
+                                                    @ArraySchema(
+                                                            minItems = 1,
+                                                            maxItems = 100,
+                                                            schema =
+                                                                    @Schema(
+                                                                            type = "string",
+                                                                            minLength = 1,
+                                                                            maxLength = 64,
+                                                                            pattern =
+                                                                                    PricingDTO.SERIAL_NUMBER_PATTERN))))
+                    @RequestBody
+                    JsonNode request) {
+        List<String> serialNumbers = batchSerialNumbers(request);
+        return service.getCachedBatch(serialNumbers).stream()
+                .map(converter::toResponse)
+                .toList();
+    }
+
     @Operation(operationId = "replacePricing", summary = "Fully replace pricing")
     @ApiResponses({
         @ApiResponse(
@@ -422,6 +504,30 @@ public class PricingController {
                 throw new RequestValidationException(name, "must not be blank");
             }
         });
+    }
+
+    private List<String> batchSerialNumbers(JsonNode request) {
+        if (request == null || !request.isArray()) {
+            throw new RequestValidationException("serialNumbers", "must be a JSON array");
+        }
+        if (request.isEmpty() || request.size() > MAX_BATCH_SIZE) {
+            throw new RequestValidationException("serialNumbers", "must contain between 1 and 100 serial numbers");
+        }
+
+        LinkedHashSet<String> serialNumbers = new LinkedHashSet<>();
+        int index = 0;
+        for (JsonNode element : request) {
+            if (element == null || !element.isString()) {
+                throw new RequestValidationException("serialNumbers[" + index + "]", "must be a string");
+            }
+            String serialNumber = element.asString();
+            if (!serialNumber.matches(PricingDTO.SERIAL_NUMBER_PATTERN)) {
+                throw new RequestValidationException("serialNumbers[" + index + "]", "must be a valid serial number");
+            }
+            serialNumbers.add(serialNumber);
+            index++;
+        }
+        return new ArrayList<>(serialNumbers);
     }
 
     private PricingSortField parseSortField(String sort) {

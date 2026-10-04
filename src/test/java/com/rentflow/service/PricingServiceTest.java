@@ -1,6 +1,7 @@
 package com.rentflow.service;
 
 import java.math.BigDecimal;
+import java.util.List;
 import java.util.Optional;
 
 import org.junit.jupiter.api.Test;
@@ -124,6 +125,42 @@ class PricingServiceTest {
 
         assertThat(result).isSameAs(entry);
         verify(cacheService).get("DRILL-001");
+        verifyNoInteractions(repository);
+    }
+
+    @Test
+    void getsCachedBatchInInputOrderThroughTheSeparateCacheService() {
+        PricingCacheEntry saw = PricingCacheEntry.from(pricing("SAW-002", "75.00"));
+        PricingCacheEntry drill = PricingCacheEntry.from(pricing("DRILL-001", "125.50"));
+        when(cacheService.get("SAW-002")).thenReturn(saw);
+        when(cacheService.get("DRILL-001")).thenReturn(drill);
+        PricingService service = new PricingService(repository, inventoryGateway, cacheService);
+
+        List<PricingCacheEntry> entries = service.getCachedBatch(List.of("SAW-002", "DRILL-001"));
+
+        assertThat(entries).containsExactly(saw, drill);
+        InOrder inOrder = org.mockito.Mockito.inOrder(cacheService);
+        inOrder.verify(cacheService).get("SAW-002");
+        inOrder.verify(cacheService).get("DRILL-001");
+        verifyNoMoreInteractions(cacheService);
+        verifyNoInteractions(repository);
+    }
+
+    @Test
+    void stopsCachedBatchAtTheFirstMissingSerial() {
+        PricingCacheEntry saw = PricingCacheEntry.from(pricing("SAW-002", "75.00"));
+        when(cacheService.get("SAW-002")).thenReturn(saw);
+        when(cacheService.get("MISSING")).thenThrow(new PricingNotFoundException("MISSING"));
+        PricingService service = new PricingService(repository, inventoryGateway, cacheService);
+
+        assertThatThrownBy(() -> service.getCachedBatch(List.of("SAW-002", "MISSING", "LATER")))
+                .isInstanceOf(PricingNotFoundException.class)
+                .hasMessageContaining("MISSING");
+
+        InOrder inOrder = org.mockito.Mockito.inOrder(cacheService);
+        inOrder.verify(cacheService).get("SAW-002");
+        inOrder.verify(cacheService).get("MISSING");
+        verify(cacheService, never()).get("LATER");
         verifyNoInteractions(repository);
     }
 

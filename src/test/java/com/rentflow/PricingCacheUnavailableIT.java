@@ -109,8 +109,20 @@ class PricingCacheUnavailableIT extends PostgresIntegrationTest {
         mockMvc.perform(get("/api/v1/pricing/OUTAGE-MISSING/cached"))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.code").value("PRICING_NOT_FOUND"));
-        assertThat(cacheErrors("get")).isGreaterThanOrEqualTo(getErrorsBefore + 2.0);
-        assertThat(cacheErrors("put")).isGreaterThanOrEqualTo(putErrorsBefore + 1.0);
+        mockMvc.perform(post("/api/v1/pricing/batch/cached")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("[\"OUTAGE-AUTH\",\"OUTAGE-CACHED\",\"OUTAGE-AUTH\"]"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(2))
+                .andExpect(jsonPath("$[0].serialNumber").value("OUTAGE-AUTH"))
+                .andExpect(jsonPath("$[1].serialNumber").value("OUTAGE-CACHED"));
+        mockMvc.perform(post("/api/v1/pricing/batch/cached")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("[\"OUTAGE-AUTH\",\"OUTAGE-MISSING\",\"OUTAGE-CACHED\"]"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.code").value("PRICING_NOT_FOUND"));
+        assertThat(cacheErrors("get")).isGreaterThanOrEqualTo(getErrorsBefore + 6.0);
+        assertThat(cacheErrors("put")).isGreaterThanOrEqualTo(putErrorsBefore + 4.0);
 
         double evictErrorsBefore = cacheErrors("evict");
         mockMvc.perform(post("/api/v1/pricing")
@@ -122,6 +134,11 @@ class PricingCacheUnavailableIT extends PostgresIntegrationTest {
                         .content(request("OUTAGE-REPLACE", "250.00")))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.price").value(250.00));
+        mockMvc.perform(post("/api/v1/pricing/batch/cached")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("[\"OUTAGE-REPLACE\"]"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].price").value(250.00));
         mockMvc.perform(delete("/api/v1/pricing/OUTAGE-DELETE")).andExpect(status().isNoContent());
         mockMvc.perform(get("/api/v1/pricing")).andExpect(status().isOk());
         mockMvc.perform(get("/readyz"))

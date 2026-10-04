@@ -9,8 +9,8 @@ Shared pricing, persistence, error, and platform foundations are linked instead 
 
 ### 1.1 Specification ownership
 
-This feature owns the Redis-backed cache-aside path for retrieving one pricing resource and the
-invalidation triggered by Pricing-owned mutations. The
+This feature owns the Redis-backed cache-aside paths for retrieving one or a bounded batch of
+pricing resources and the invalidation triggered by Pricing-owned mutations. The
 [Service Skeleton design](../service-skeleton/design.md) remains authoritative for:
 
 - the `PricingDTO` response shape and serial-number validation in §2.3 and §5.1;
@@ -24,7 +24,8 @@ Inventory validation, and its repository transaction boundary. This feature adds
 after-success cache invalidation to create without changing that ordering or holding a database
 transaction across the Inventory call.
 
-Only `GET /api/v1/pricing/{serialNumber}/cached` uses Redis. The authoritative single-resource
+Only `GET /api/v1/pricing/{serialNumber}/cached` and
+`POST /api/v1/pricing/batch/cached` use Redis for retrieval. The authoritative single-resource
 endpoint, collection listing, and all write decisions continue to use PostgreSQL directly.
 
 ### 1.2 Components and packages
@@ -33,7 +34,7 @@ The implementation extends the existing packages without adding a new applicatio
 
 | Package | Type | Responsibility |
 | --- | --- | --- |
-| `com.rentflow.controller` | `PricingController` | Bind and document cached retrieval |
+| `com.rentflow.controller` | `PricingController` | Bind and document single and batch cached retrieval |
 | `com.rentflow.converter` | `PricingConverter` | Map both authoritative entities and cache entries to the shared `PricingDTO` response |
 | `com.rentflow.service` | `PricingService` | Keep authoritative reads and evict the affected key after successful mutations |
 | `com.rentflow.service` | `PricingCacheService` | Execute the proxied cache-aside lookup |
@@ -95,6 +96,18 @@ GET /api/v1/pricing/{serialNumber}/cached
   -> PricingCacheEntry
   -> PricingConverter.toResponse(PricingCacheEntry)
   -> PricingDTO
+```
+
+Batch retrieval follows the same per-serial path without a second cache:
+
+```text
+POST /api/v1/pricing/batch/cached
+  -> validate the complete JSON array and deduplicate in first-occurrence order
+  -> PricingService.getCachedBatch
+  -> proxied PricingCacheService.get for each distinct serial
+  -> existing Redis key or PostgreSQL miss path for that serial
+  -> PricingConverter.toResponse(PricingCacheEntry) for each result
+  -> ordered JSON array of PricingDTO
 ```
 
 Mutation invalidation is commit-aware:
@@ -160,6 +173,36 @@ the authoritative one-segment path; only a following `/cached` selects cached re
 Existing callers, operation IDs, request validation, response examples, and write contracts do
 not change. Cached retrieval is additive within API version `v1`.
 
+### 2.4 Cached batch retrieval
+
+`POST /api/v1/pricing/batch/cached` has operation ID `getCachedPricingBatch`, consumes
+`application/json`, and produces `application/json`. The request body is a bare JSON array of
+one to 100 case-sensitive serial-number strings, for example
+`["DRILL-001","SAW-002"]`. The bound applies to the input element count before deduplication.
+Each element must be a JSON string matching `PricingDTO.SERIAL_NUMBER_PATTERN`; null, blank,
+non-string, and invalid-pattern elements are rejected. The controller validates the entire body
+before any Redis or PostgreSQL lookup, then deduplicates with first-occurrence order preserved.
+`DRILL-001` and `drill-001` remain distinct.
+
+A successful response is a bare JSON array of the existing six-field `PricingDTO` values, one
+per distinct serial in first-occurrence order. There is no aggregate cache key, batch DTO,
+source header, page wrapper, or calculated rental-price field.
+
+| Condition | Status and body |
+| --- | --- |
+| Every distinct serial has pricing | `200 OK` and ordered `PricingDTO[]` |
+| First distinct serial missing from both cache and PostgreSQL | Existing `404 PRICING_NOT_FOUND` Problem Details for that serial; no partial response |
+| Invalid JSON or non-array/empty/oversized/invalid element | `400 Bad Request` Problem Details; no lookup |
+| Unsupported request media type | Existing `415 Unsupported Media Type` Problem Details |
+| Unacceptable response type | Existing `406 Not Acceptable` Problem Details |
+| Unexpected PostgreSQL/application failure | Sanitized `500 Internal Server Error` Problem Details |
+
+The controller uses the existing `RequestValidationException` for valid JSON with invalid
+structure or elements, reporting the `serialNumbers` field or indexed element; malformed JSON
+uses the existing malformed-body handler. The static `POST` mapping is distinct from existing
+`GET`, create, and mutation mappings, so the serial `batch` remains retrievable through the
+existing single-resource routes. Redis failures follow §4.3 and §5.5, not a new HTTP status.
+
 ## 3. Cache data model
 
 ### 3.1 Immutable payload
@@ -212,7 +255,8 @@ cache put succeeds.
 The `rentflow:pricing:v1:` namespace prevents collision with other services and leaves a schema
 version in the key. An incompatible future payload increments the namespace version rather than
 attempting an in-place Redis migration; old keys disappear through their TTL. Cache-wide clear,
-`KEYS`, and `SCAN` are not used by application flows.
+`KEYS`, and `SCAN` are not used by application flows. Both cached endpoints read and populate
+these same per-serial keys.
 
 The TTL is configured through `spring.cache.redis.time-to-live` with
 `${PRICING_CACHE_TTL:1h}`. Tests override it without changing production code. A zero, negative,
@@ -380,6 +424,22 @@ fresh. Preventing this race would require versioned rows, a distributed lock, or
 coordination mechanism and is outside this first increment. AC3.5 therefore guarantees the next
 value only when no cache fill for that serial overlaps the mutation.
 
+### 5.5 Batch orchestration and failure boundaries
+
+`PricingService.getCachedBatch(List<String>)` is a non-transactional orchestration method. It
+iterates the already validated, deduplicated serials in order and calls the injected
+`PricingCacheService.get` Spring bean once for each. Each hit skips PostgreSQL; each miss uses
+the existing read-only transaction and best-effort cache put. This first version intentionally
+uses one Redis lookup per distinct serial and one PostgreSQL query per miss, bounded by the
+100-element request limit; it does not introduce `MGET`, `findAllById`, or bulk cache plumbing.
+
+The first `PricingNotFoundException` aborts processing and maps to the existing
+`PRICING_NOT_FOUND` response. Earlier successful misses may already have populated their
+individual cache entries despite the batch's `404`; cache warming is not an atomic business
+operation, and no partial HTTP list is returned. Redis get/put failures still fail open through
+§4.3, so PostgreSQL determines the `200` or `404` result. No batch-wide transaction or atomic
+snapshot is promised: returned entries can have different ages within the existing TTL.
+
 ## 6. Mutation invalidation
 
 ### 6.1 Direct method eviction and transaction order
@@ -446,8 +506,10 @@ through environment-specific Spring properties.
 ## 8. OpenAPI and documentation
 
 The controller annotations add `getCachedPricing` with the shared serial parameter and
-`PricingDTO`/Problem Details schemas. Documented statuses are `200`, `400`, `404`, `406`, and
-`500`. Redis failure is documented as PostgreSQL fallback, not as an additional response status.
+`getCachedPricingBatch` with a bounded serial-array body. Both reuse `PricingDTO`/Problem Details
+schemas. The single endpoint documents `200`, `400`, `404`, `406`, and `500`; the batch endpoint
+also documents `415`. Redis failure is documented as PostgreSQL fallback, not as an additional
+response status.
 
 The README adds:
 
@@ -457,8 +519,10 @@ The README adds:
 - API mutation invalidation and the overlapping-fill limitation;
 - fallback and readiness behavior during Redis failure;
 - Redis host, port, timeout, and TTL environment variables;
-- local Compose startup and Redis inspection commands; and
-- the fact that no cache-source header is returned.
+- local Compose startup and Redis inspection commands;
+- the fact that no cache-source header is returned; and
+- an executable batch request with the 100-input limit, first-occurrence deduplication,
+  all-or-nothing `404`, and shared per-serial cache behavior.
 
 No Redis credential or production topology example is committed.
 
@@ -476,6 +540,8 @@ Unit tests use JUnit, AssertJ, and Mockito without a Spring context:
 | `PricingCacheErrorHandlerTest` | Get, put, evict, and clear failures are suppressed and increment only their bounded error counter |
 | `PricingServiceTest` | Authoritative get still uses the repository; cached get delegates; mutations retain their existing behavior |
 | `PricingCacheEvictionAnnotationsTest` | All three write methods evict only their serial key after successful invocation |
+| `PricingServiceTest` batch cases | Ordered delegation once per distinct serial and immediate propagation of the first missing result |
+| `PricingControllerTest` batch cases | Full-body validation before lookup, ordered full DTOs, and existing Problem Details contracts |
 
 Tests call production methods with explicit Java types and verify collaborators rather than
 starting Spring merely to exercise business orchestration.
@@ -496,7 +562,12 @@ Redis keys and TTL, and repository spy interactions:
 - a failed replacement or deletion leaves an existing cache entry intact;
 - cache metrics record hits, misses, and evictions without adding HTTP headers; and
 - an out-of-band PostgreSQL update remains hidden on cached retrieval but is visible through the
-  authoritative endpoint until expiry or eviction.
+  authoritative endpoint until expiry or eviction;
+- single and batch endpoints share keys in both directions; a mixed batch reads PostgreSQL only
+  for missing entries, preserves first-occurrence order, and leaves TTLs unrenewed on hits;
+- a batch with an invalid body performs no lookup, while a missing serial returns the existing
+  first-missing `404` without a negative entry; and
+- batch retrieval falls back per serial during Redis outages and reflects API mutation eviction.
 
 `PricingCacheUnavailableIT` starts a real Redis Testcontainer, warms the application, then stops
 that container before exercising one end-to-end outage scenario. It proves authoritative
@@ -511,9 +582,10 @@ replace the stopped-real-container outage coverage.
 
 ### 9.3 Contract, architecture, and container tests
 
-`OpenApiIT` asserts the exact cached path, operation ID, parameter constraint, shared schemas, and
-documented responses. `ArchitectureTest` permits config to depend on model for typed cache
-serialization while continuing to enforce all other layer directions, component suffixes,
+`OpenApiIT` asserts both cached paths, operation IDs, batch array request/response schemas,
+parameter constraint, shared schemas, and documented responses. `ArchitectureTest` permits
+config to depend on model for typed cache serialization while continuing to enforce all other
+layer directions, component suffixes,
 package cycles, and controller-only MVC mappings.
 
 The container smoke test starts Redis with the isolated stack, verifies Pricing readiness does
@@ -537,5 +609,8 @@ The final implementation must pass `mvn -B -ntp clean verify` with Java 25 and D
 | AC5.3 | §7, §9.3 |
 | AC5.4 | §9.1-§9.2 |
 | AC5.5 | §9.3 |
+| AC6.1-AC6.4 | §2.4, §3.3, §5.5 |
+| AC6.5-AC6.6 | §2.4, §4.3, §5.5 |
+| AC6.7-AC6.8 | §8, §9.3 |
 
 No requirement changes the PostgreSQL schema or requires a Flyway migration.

@@ -15,7 +15,7 @@ The two retrieval choices intentionally provide different consistency guarantees
 | Consumer need | Endpoint | Guarantee |
 | --- | --- | --- |
 | Latest committed pricing | `GET /api/v1/pricing/{serialNumber}` | Reads PostgreSQL and does not return a cached representation |
-| Popular, read-heavy access | `GET /api/v1/pricing/{serialNumber}/cached` | May return a Redis copy that is at most one configured TTL old |
+| Popular, read-heavy access | `GET /api/v1/pricing/{serialNumber}/cached` or `POST /api/v1/pricing/batch/cached` | May return Redis copies that are at most one configured TTL old |
 
 Redis is an acceleration layer, not a system of record. A cache hit means Redis already contains a
 positive pricing representation for the serial number. A cache miss means that no usable entry is
@@ -34,7 +34,7 @@ This feature owns only cached retrieval and its interaction with existing resour
 
 | Capability | Contract owner |
 | --- | --- |
-| Cached single-resource retrieval | This feature |
+| Cached single-resource and batch retrieval | This feature |
 | Cache TTL, population, invalidation, and degraded behavior | This feature |
 | Authoritative single-resource retrieval and shared response representation | [Service Skeleton](../service-skeleton/requirements.md) |
 | Create pricing | [Price Creation](../price-creation/requirements.md) |
@@ -136,9 +136,41 @@ documented and automatically verified so that I can use and operate caching deli
   documented prerequisites, the build shall execute the caching unit, integration, OpenAPI, and
   architecture checks as part of the existing verification lifecycle.
 
+### US6 - Retrieve a bounded batch through the existing cache
+
+As a pricing consumer requesting several equipment prices, I want one cache-backed request that
+reuses the single-item cache so that repeated serials and already cached prices avoid extra
+database work without introducing a separate collection cache.
+
+- **AC6.1 (Event-driven):** When a client posts one to 100 valid serial-number strings to
+  `POST /api/v1/pricing/batch/cached` and every distinct serial has pricing, the pricing service
+  shall return `200 OK` with the existing six-field pricing representation for each distinct
+  serial in first-occurrence request order.
+- **AC6.2 (Event-driven):** When a requested serial has a valid, unexpired entry in the existing
+  `pricingBySerial` cache, the pricing service shall use that entry without reading PostgreSQL or
+  renewing its TTL.
+- **AC6.3 (Event-driven):** When a requested serial has no usable cache entry but PostgreSQL has
+  pricing, the pricing service shall read PostgreSQL and attempt to populate the existing
+  per-serial cache entry without creating a batch cache.
+- **AC6.4 (Unwanted):** If any requested serial has no pricing in either source, then the pricing
+  service shall stop at the first missing distinct serial and return the existing `404
+  PRICING_NOT_FOUND` Problem Details response without a partial pricing list or a negative cache
+  entry.
+- **AC6.5 (Unwanted):** If the batch body is not a JSON array of one to 100 valid serial-number
+  strings, then the pricing service shall return `400` Problem Details before reading Redis or
+  PostgreSQL.
+- **AC6.6 (Unwanted):** If Redis is unavailable or times out during a batch lookup, then the
+  pricing service shall use PostgreSQL fallback for affected serials and preserve the same
+  `200` or `404` outcome it would provide with Redis available.
+- **AC6.7 (Ubiquitous):** The Pricing OpenAPI document shall describe the batch request array,
+  ordered `PricingDTO` response array, and `200`, `400`, `404`, `406`, `415`, and `500` outcomes.
+- **AC6.8 (Ubiquitous):** The repository README shall document a copyable batch request and its
+  deduplication, limit, all-or-nothing response, and shared-cache behavior.
+
 ## Out of scope
 
-- Caching `GET /api/v1/pricing`, its paginated pages, or any write operation.
+- Caching `GET /api/v1/pricing`, its paginated pages, or any write operation; the new batch
+  retrieval reuses per-serial entries and does not cache an aggregate response.
 - Replacing PostgreSQL with Redis as the authoritative pricing store.
 - Caching `404 Not Found` responses or any other failure response.
 - Adding cache-source headers, fields, query parameters, or different success representations.
@@ -156,8 +188,8 @@ documented and automatically verified so that I can use and operate caching deli
 The following product decisions are resolved. Their implementation mechanisms and trade-offs are
 justified in `design.md`.
 
-1. **Cache scope:** Only single-pricing retrieval is cached; collection listing remains
-   PostgreSQL-backed. See `design.md` §1.1 and §2.
+1. **Cache scope:** Single-pricing and bounded batch retrieval share per-serial cache entries;
+   collection listing remains PostgreSQL-backed. See `design.md` §1.1 and §2.
 2. **API choice:** The existing `GET /api/v1/pricing/{serialNumber}` remains authoritative, and
    `GET /api/v1/pricing/{serialNumber}/cached` provides the cache-enabled alternative. See
    `design.md` §2.
@@ -171,3 +203,16 @@ justified in `design.md`.
 6. **Negative caching:** Missing pricing is not cached. See `design.md` §5.2.
 7. **Client visibility:** Responses do not reveal whether Redis or PostgreSQL supplied the result.
    See `design.md` §2.2 and §4.4.
+8. **Batch request form:** Use `POST /api/v1/pricing/batch/cached` with a JSON array of serial
+   strings. See `design.md` §2.4.
+9. **Batch representation:** Return the existing full six-field `PricingDTO` per distinct serial.
+   See `design.md` §2.4.
+10. **Missing pricing:** Fail the whole batch with the existing `404` rather than a partial list.
+    See `design.md` §2.4 and §5.5.
+11. **Batch bound:** Accept one to 100 input elements before deduplication. See `design.md` §2.4.
+12. **Duplicate serials:** Deduplicate case-sensitively and retain first-occurrence order. See
+    `design.md` §2.4.
+13. **Lookup approach:** Call the existing proxied per-serial cache method once per distinct
+    serial instead of adding bulk Redis or PostgreSQL I/O. See `design.md` §5.5.
+14. **Missing detail:** Stop at the first missing distinct serial and reuse its existing
+    `PRICING_NOT_FOUND` Problem Details response. See `design.md` §2.4 and §5.5.

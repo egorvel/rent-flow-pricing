@@ -1,6 +1,6 @@
 # Pricing Cache Implementation Tasks
 
-Status: Agreed; T1-T5 pending.
+Status: Agreed; T1-T6 defined.
 
 ## 1. Delivery rules
 
@@ -26,12 +26,14 @@ flowchart TD
     T2 --> T3["T3 Commit-aware invalidation"]
     T3 --> T4["T4 Real-Redis and outage verification"]
     T4 --> T5["T5 Compose, API documentation, and acceptance"]
+    T5 --> T6["T6 Cached batch retrieval"]
     PC2["Price Creation T2 smoke prerequisite"] --> T5
 ```
 
 The feature path is intentionally linear. T1 makes Redis optional and fail-open before any HTTP
 operation can use it; T2 adds reads; T3 adds write-side invalidation; T4 proves both with real
-infrastructure; and T5 publishes and smoke-tests the completed contract. T5 also depends on Price
+infrastructure; T5 publishes and smoke-tests the initial contract; and T6 extends it with bounded
+batch retrieval through the same per-serial cache. T5 also depends on Price
 Creation T2 because the shared smoke script must be able to create its pricing fixture before it
 can warm and inspect that fixture's cache entry.
 
@@ -308,6 +310,51 @@ AC4.1-AC4.4, and AC5.4; `design.md` §3.2-§3.3, §4.2-§4.4, §5,
 - [ ] `bash -n scripts/container-smoke-test.sh`, `docker compose config`, and
   `scripts/container-smoke-test.sh` succeed after the Maven lifecycle.
 
+### T6 - Add bounded cached batch retrieval
+
+**State:** Pending.
+
+**Commit:** `feat: add cached batch pricing retrieval`
+
+**Depends on:** T5.
+
+**Refs.** `requirements.md` AC6.1-AC6.8; `design.md` §1.4, §2.4, §3.3, §4.3,
+§5.5, §8, and §9.1-§9.3.
+
+**Scope.**
+
+- Add `POST /api/v1/pricing/batch/cached` with a bare JSON-array body, strict validation of
+  one to 100 input strings before lookup, case-sensitive first-occurrence deduplication, and
+  an ordered full-`PricingDTO` array response.
+- Add non-transactional `PricingService.getCachedBatch` orchestration over the existing proxied
+  `PricingCacheService.get`; stop at the first missing serial and reuse its existing `404`.
+- Reuse all existing per-serial Redis keys, TTL, invalidation, metrics, and fail-open behavior;
+  add no batch cache, bulk Redis/database operation, new response model, or migration.
+- Extend unit, HTTP, real-Redis, outage, OpenAPI, and README coverage without changing the
+  existing single-item, authoritative, listing, or write contracts.
+
+**DoD.**
+
+- [ ] Controller tests prove a one-to-100-element JSON string array is validated in full before
+  any lookup; empty, 101-element, non-array, null/non-string element, and invalid serial inputs
+  return `400`, while wrong media type returns `415` (AC6.1, AC6.5).
+- [ ] A batch with case-sensitive duplicates returns one complete `PricingDTO` per distinct
+  serial in first-occurrence order, and service tests prove one proxied lookup per distinct
+  serial and no batch-wide transaction (AC6.1).
+- [ ] Real-Redis tests prove single-item warming serves a batch hit and batch warming serves a
+  single-item hit at the unchanged key; a mixed batch consults PostgreSQL only for misses and
+  does not renew hit TTLs or create an aggregate key (AC6.2-AC6.3).
+- [ ] The first missing distinct serial returns the existing `404 PRICING_NOT_FOUND` body with
+  no partial array or negative entry; later serials are not looked up, while earlier positive
+  cache fills remain usable (AC6.4).
+- [ ] Redis-outage tests prove per-serial PostgreSQL fallback preserves the batch's `200` or
+  first-missing `404`; mutation eviction is visible on the next batch request (AC6.6).
+- [ ] `OpenApiIT` proves the exact path, operation ID, bounded string-array request, ordered
+  `PricingDTO` array response, and `200`, `400`, `404`, `406`, `415`, `500` statuses; README
+  includes an executable example and explains limit, deduplication, first-missing `404`, and
+  shared cache (AC6.7-AC6.8).
+- [ ] `mvn -B -ntp clean verify` reports `BUILD SUCCESS` with no skip flags.
+
 ## 4. Acceptance-criteria traceability
 
 | Acceptance criteria | Regression-sensitive task evidence |
@@ -329,6 +376,12 @@ AC4.1-AC4.4, and AC5.4; `design.md` §3.2-§3.3, §4.2-§4.4, §5,
 | AC5.3 | T5 Compose configuration, clean startup, and container smoke assertions |
 | AC5.4 | T4 real-Redis hit, miss, expiry, invalidation, and outage integration suite |
 | AC5.5 | T5 final unskipped Java 25 Maven lifecycle assertion |
+| AC6.1 | T6 request validation, deduplication, ordering, and full-response assertions |
+| AC6.2-AC6.3 | T6 cross-endpoint cache-sharing, mixed hit/miss, key, and TTL assertions |
+| AC6.4 | T6 first-missing response and cache-state assertions |
+| AC6.5 | T6 invalid-input/no-lookup and wrong-media assertions |
+| AC6.6 | T6 Redis-outage fallback and post-mutation retrieval assertions |
+| AC6.7-AC6.8 | T6 OpenAPI contract and executable README example assertions |
 
 Every acceptance criterion is tied to a DoD assertion that becomes observably false when the
 specified behavior regresses.
@@ -336,7 +389,7 @@ specified behavior regresses.
 ## 5. Explicit exclusions and follow-up boundaries
 
 - Do not fix, suppress, retry, or weaken the pre-existing concurrent-create test as part of
-  T1-T5; track its production race separately if it reproduces.
+  T1-T6; track its production race separately if it reproduces.
 - Do not add negative caching, collection caching, warming, refresh-ahead, HTTP cache semantics,
   distributed locks, Redis persistence/high availability, or a PostgreSQL migration.
 - Do not expand T5 to reimplement the Inventory smoke fixture owned by Price Creation T2; satisfy

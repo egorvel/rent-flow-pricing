@@ -195,6 +195,90 @@ class PricingCacheIT extends PostgresIntegrationTest {
     }
 
     @Test
+    void batchAndSingleReadsSharePerSerialKeysWithoutRenewingHitTtl() throws Exception {
+        save("BATCH-WARM", "100.00");
+        save("BATCH-MISS", "125.00");
+        save("BATCH-LAST", "150.00");
+        warm("BATCH-WARM");
+        Long originalTtl = redisTemplate.getExpire(cacheKey("BATCH-WARM"), TimeUnit.MILLISECONDS);
+        reset(repository);
+
+        mockMvc.perform(post("/api/v1/pricing/batch/cached")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("[\"BATCH-WARM\",\"BATCH-MISS\",\"BATCH-WARM\",\"BATCH-LAST\"]"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(3))
+                .andExpect(jsonPath("$[0].serialNumber").value("BATCH-WARM"))
+                .andExpect(jsonPath("$[0].price").value(100.00))
+                .andExpect(jsonPath("$[1].serialNumber").value("BATCH-MISS"))
+                .andExpect(jsonPath("$[1].price").value(125.00))
+                .andExpect(jsonPath("$[2].serialNumber").value("BATCH-LAST"))
+                .andExpect(jsonPath("$[2].price").value(150.00));
+
+        verify(repository, never()).findById("BATCH-WARM");
+        verify(repository, times(1)).findById("BATCH-MISS");
+        verify(repository, times(1)).findById("BATCH-LAST");
+        assertThat(redisTemplate.getExpire(cacheKey("BATCH-WARM"), TimeUnit.MILLISECONDS))
+                .isPositive()
+                .isLessThanOrEqualTo(originalTtl);
+        assertThat(redisTemplate.keys("rentflow:pricing:v1:*"))
+                .containsExactlyInAnyOrder(cacheKey("BATCH-WARM"), cacheKey("BATCH-MISS"), cacheKey("BATCH-LAST"));
+
+        mockMvc.perform(get("/api/v1/pricing/BATCH-MISS/cached"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.price").value(125.00));
+        verify(repository, times(1)).findById("BATCH-MISS");
+    }
+
+    @Test
+    void missingBatchSerialReturnsOneProblemWithoutCachingAbsenceOrLookingPastIt() throws Exception {
+        save("BATCH-FIRST", "100.00");
+        save("BATCH-LATER", "200.00");
+        reset(repository);
+
+        mockMvc.perform(post("/api/v1/pricing/batch/cached")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("[\"BATCH-FIRST\",\"BATCH-MISSING\",\"BATCH-LATER\"]"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.code").value("PRICING_NOT_FOUND"));
+
+        verify(repository, times(1)).findById("BATCH-FIRST");
+        verify(repository, times(1)).findById("BATCH-MISSING");
+        verify(repository, never()).findById("BATCH-LATER");
+        assertThat(redisTemplate.hasKey(cacheKey("BATCH-FIRST"))).isTrue();
+        assertThat(redisTemplate.hasKey(cacheKey("BATCH-MISSING"))).isFalse();
+        assertThat(redisTemplate.hasKey(cacheKey("BATCH-LATER"))).isFalse();
+
+        mockMvc.perform(get("/api/v1/pricing/BATCH-FIRST/cached"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.price").value(100.00));
+        verify(repository, times(1)).findById("BATCH-FIRST");
+    }
+
+    @Test
+    void replacementEvictsAnEntryWarmedByBatchRetrieval() throws Exception {
+        save("BATCH-REPLACE", "100.00");
+        mockMvc.perform(post("/api/v1/pricing/batch/cached")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("[\"BATCH-REPLACE\"]"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].price").value(100.00));
+        assertThat(redisTemplate.hasKey(cacheKey("BATCH-REPLACE"))).isTrue();
+
+        mockMvc.perform(put("/api/v1/pricing/BATCH-REPLACE")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(request("BATCH-REPLACE", "200.00")))
+                .andExpect(status().isOk());
+        assertThat(redisTemplate.hasKey(cacheKey("BATCH-REPLACE"))).isFalse();
+
+        mockMvc.perform(post("/api/v1/pricing/batch/cached")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("[\"BATCH-REPLACE\"]"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].price").value(200.00));
+    }
+
+    @Test
     void hitHidesOutOfBandUpdateUntilTheFixedTtlExpiresWhileAuthoritativeGetIsCurrent() throws Exception {
         save("DRILL-TTL", "100.00");
         reset(repository);

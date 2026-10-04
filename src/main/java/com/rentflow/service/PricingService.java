@@ -53,6 +53,14 @@ public class PricingService {
         return cacheService.get(serialNumber);
     }
 
+    public List<PricingCacheEntry> getCachedBatch(List<String> serialNumbers) {
+        List<PricingCacheEntry> entries = new ArrayList<>(serialNumbers.size());
+        for (String serialNumber : serialNumbers) {
+            entries.add(cacheService.get(serialNumber));
+        }
+        return entries;
+    }
+
     @Transactional(readOnly = true)
     public Page<Pricing> list(int page, int size, PricingSortField sortField, Sort.Direction direction) {
         List<Sort.Order> orders = new ArrayList<>();

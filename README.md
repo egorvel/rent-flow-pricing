@@ -182,17 +182,27 @@ values, and sorted field violations for validation failures.
 
 ## Authoritative and Cached Retrieval
 
-Pricing provides two retrieval choices for the same response contract:
+Pricing provides an authoritative retrieval path and two cached retrieval paths:
 
 - `GET /api/v1/pricing/{serialNumber}` always reads PostgreSQL. Use it when the caller must see
   the latest committed value.
 - `GET /api/v1/pricing/{serialNumber}/cached` uses Redis cache-aside. Use it for frequent reads
   where bounded staleness is acceptable.
+- `POST /api/v1/pricing/batch/cached` retrieves several serial numbers through that same
+  per-serial cache. Its JSON body is an array of 1–100 serial strings, and its response is an
+  array of the same six-field pricing objects.
+
+The batch limit counts input elements before duplicates are removed. Duplicate serial numbers
+are looked up and returned only once, in first-occurrence order; matching is case-sensitive.
+If any serial is missing, the whole batch returns `404 PRICING_NOT_FOUND` instead of a partial
+array. The batch creates no separate cache entry: it reads and warms the same per-serial keys
+as the single-item cached endpoint.
 
 The cached endpoint stores only successful pricing lookups. Missing serial numbers are not
 cached, so each `404` is checked against PostgreSQL. A cached value has a fixed, non-renewing TTL:
 the default is one hour, configured with `PRICING_CACHE_TTL`, and cache hits do not extend it.
-Both endpoints return the same `PricingDTO` or Problem Details and expose no cache-source field,
+The single-item endpoints return the same `PricingDTO` or Problem Details; the batch returns an
+array of those DTOs or one Problem Details response. None exposes a cache-source field,
 `X-Cache`, or `Age` header.
 
 Successful create, replace, and delete operations evict only the affected key after the database
@@ -248,6 +258,16 @@ Retrieve it through the one-hour cache for a high-volume read path:
 ```bash
 curl --fail-with-body \
   'http://localhost:8081/api/v1/pricing/DRILL-001/cached'
+```
+
+Retrieve several prices through those same per-serial cache entries (after creating pricing
+for each serial):
+
+```bash
+curl --fail-with-body \
+  --request POST 'http://localhost:8081/api/v1/pricing/batch/cached' \
+  --header 'Content-Type: application/json' \
+  --data '["DRILL-001", "SAW-002", "DRILL-001"]'
 ```
 
 Request the first ten resources ordered by descending daily price. Non-serial sorts use

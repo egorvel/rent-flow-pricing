@@ -72,7 +72,7 @@ class OpenApiIT extends PostgresIntegrationTest {
     }
 
     @Test
-    void exposesOnlyTheSixUnauthenticatedPricingOperations() {
+    void exposesOnlyTheSevenUnauthenticatedPricingOperations() {
         assertThat(document.path("openapi").asString()).startsWith("3.");
         assertThat(document.at("/info/title").asString()).isEqualTo("RentFlow Pricing API");
         assertThat(document.at("/info/version").asString()).isEqualTo("v1");
@@ -81,7 +81,10 @@ class OpenApiIT extends PostgresIntegrationTest {
         JsonNode paths = document.path("paths");
         assertThat(names(paths))
                 .containsExactlyInAnyOrder(
-                        "/api/v1/pricing", "/api/v1/pricing/{serialNumber}", "/api/v1/pricing/{serialNumber}/cached");
+                        "/api/v1/pricing",
+                        "/api/v1/pricing/{serialNumber}",
+                        "/api/v1/pricing/{serialNumber}/cached",
+                        "/api/v1/pricing/batch/cached");
         assertThat(operation("/api/v1/pricing", "post").path("operationId").asString())
                 .isEqualTo("createPricing");
         assertThat(operation("/api/v1/pricing", "get").path("operationId").asString())
@@ -94,6 +97,10 @@ class OpenApiIT extends PostgresIntegrationTest {
                         .path("operationId")
                         .asString())
                 .isEqualTo("getCachedPricing");
+        assertThat(operation("/api/v1/pricing/batch/cached", "post")
+                        .path("operationId")
+                        .asString())
+                .isEqualTo("getCachedPricingBatch");
         assertThat(operation("/api/v1/pricing/{serialNumber}", "put")
                         .path("operationId")
                         .asString())
@@ -106,6 +113,7 @@ class OpenApiIT extends PostgresIntegrationTest {
         assertThat(paths.path("/api/v1/pricing/{serialNumber}").has("patch")).isFalse();
         assertThat(paths.path("/api/v1/pricing/{serialNumber}/cached").has("patch"))
                 .isFalse();
+        assertThat(paths.path("/api/v1/pricing/batch/cached").has("patch")).isFalse();
         assertThat(names(paths))
                 .noneMatch(path -> path.startsWith("/actuator") || path.equals("/livez") || path.equals("/readyz"));
 
@@ -188,6 +196,17 @@ class OpenApiIT extends PostgresIntegrationTest {
 
         assertRequestBodySchema(operation("/api/v1/pricing", "post"), "PricingDTO");
         assertRequestBodySchema(operation("/api/v1/pricing/{serialNumber}", "put"), "PricingDTO");
+        JsonNode batch = operation("/api/v1/pricing/batch/cached", "post");
+        assertThat(batch.at("/requestBody/required").asBoolean()).isTrue();
+        JsonNode batchBody = resolved(batch.at("/requestBody/content/application~1json/schema"));
+        assertThat(batchBody.path("type").asString()).isEqualTo("array");
+        assertThat(batchBody.path("minItems").asInt()).isEqualTo(1);
+        assertThat(batchBody.path("maxItems").asInt()).isEqualTo(100);
+        JsonNode batchItem = resolved(batchBody.path("items"));
+        assertThat(batchItem.path("type").asString()).isEqualTo("string");
+        assertThat(batchItem.path("minLength").asInt()).isEqualTo(1);
+        assertThat(batchItem.path("maxLength").asInt()).isEqualTo(64);
+        assertThat(batchItem.path("pattern").asString()).isEqualTo(PricingDTO.SERIAL_NUMBER_PATTERN);
     }
 
     @Test
@@ -211,6 +230,12 @@ class OpenApiIT extends PostgresIntegrationTest {
         assertResponseCodes(cachedGet, "200", "400", "404", "406", "500");
         assertResponseSchema(cachedGet, "200", MediaType.APPLICATION_JSON_VALUE, "PricingDTO");
 
+        JsonNode cachedBatch = operation("/api/v1/pricing/batch/cached", "post");
+        assertResponseCodes(cachedBatch, "200", "400", "404", "406", "415", "500");
+        JsonNode batchResponse = resolved(responseSchema(cachedBatch, "200", MediaType.APPLICATION_JSON_VALUE));
+        assertThat(batchResponse.path("type").asString()).isEqualTo("array");
+        assertThat(batchResponse.path("items").path("$ref").asString()).endsWith("/PricingDTO");
+
         JsonNode replace = operation("/api/v1/pricing/{serialNumber}", "put");
         assertResponseCodes(replace, "200", "400", "404", "406", "415", "500");
         assertResponseSchema(replace, "200", MediaType.APPLICATION_JSON_VALUE, "PricingDTO");
@@ -223,6 +248,7 @@ class OpenApiIT extends PostgresIntegrationTest {
         assertProblemSchemas(list, Set.of("400", "406", "500"));
         assertProblemSchemas(get, Set.of("400", "404", "406", "500"));
         assertProblemSchemas(cachedGet, Set.of("400", "404", "406", "500"));
+        assertProblemSchemas(cachedBatch, Set.of("400", "404", "406", "415", "500"));
         assertProblemSchemas(replace, Set.of("400", "404", "406", "415", "500"));
         assertProblemSchemas(delete, Set.of("400", "404", "500"));
     }
@@ -316,6 +342,8 @@ class OpenApiIT extends PostgresIntegrationTest {
                 operation("/api/v1/pricing", "post"),
                 operation("/api/v1/pricing", "get"),
                 operation("/api/v1/pricing/{serialNumber}", "get"),
+                operation("/api/v1/pricing/{serialNumber}/cached", "get"),
+                operation("/api/v1/pricing/batch/cached", "post"),
                 operation("/api/v1/pricing/{serialNumber}", "put"),
                 operation("/api/v1/pricing/{serialNumber}", "delete"));
     }
