@@ -129,38 +129,32 @@ class PricingServiceTest {
     }
 
     @Test
-    void getsCachedBatchInInputOrderThroughTheSeparateCacheService() {
+    void delegatesCachedBatchToTheSeparateCacheService() {
         PricingCacheEntry saw = PricingCacheEntry.from(pricing("SAW-002", "75.00"));
         PricingCacheEntry drill = PricingCacheEntry.from(pricing("DRILL-001", "125.50"));
-        when(cacheService.get("SAW-002")).thenReturn(saw);
-        when(cacheService.get("DRILL-001")).thenReturn(drill);
+        List<String> serialNumbers = List.of("SAW-002", "DRILL-001");
+        when(cacheService.getBatch(serialNumbers)).thenReturn(List.of(drill, saw));
         PricingService service = new PricingService(repository, inventoryGateway, cacheService);
 
-        List<PricingCacheEntry> entries = service.getCachedBatch(List.of("SAW-002", "DRILL-001"));
+        List<PricingCacheEntry> entries = service.getCachedBatch(serialNumbers);
 
-        assertThat(entries).containsExactly(saw, drill);
-        InOrder inOrder = org.mockito.Mockito.inOrder(cacheService);
-        inOrder.verify(cacheService).get("SAW-002");
-        inOrder.verify(cacheService).get("DRILL-001");
+        assertThat(entries).containsExactly(drill, saw);
+        verify(cacheService).getBatch(serialNumbers);
         verifyNoMoreInteractions(cacheService);
         verifyNoInteractions(repository);
     }
 
     @Test
-    void stopsCachedBatchAtTheFirstMissingSerial() {
-        PricingCacheEntry saw = PricingCacheEntry.from(pricing("SAW-002", "75.00"));
-        when(cacheService.get("SAW-002")).thenReturn(saw);
-        when(cacheService.get("MISSING")).thenThrow(new PricingNotFoundException("MISSING"));
+    void propagatesMissingPricingFromTheBulkCacheService() {
+        List<String> serialNumbers = List.of("SAW-002", "MISSING", "LATER");
+        when(cacheService.getBatch(serialNumbers)).thenThrow(new PricingNotFoundException("MISSING"));
         PricingService service = new PricingService(repository, inventoryGateway, cacheService);
 
-        assertThatThrownBy(() -> service.getCachedBatch(List.of("SAW-002", "MISSING", "LATER")))
+        assertThatThrownBy(() -> service.getCachedBatch(serialNumbers))
                 .isInstanceOf(PricingNotFoundException.class)
                 .hasMessageContaining("MISSING");
 
-        InOrder inOrder = org.mockito.Mockito.inOrder(cacheService);
-        inOrder.verify(cacheService).get("SAW-002");
-        inOrder.verify(cacheService).get("MISSING");
-        verify(cacheService, never()).get("LATER");
+        verify(cacheService).getBatch(serialNumbers);
         verifyNoInteractions(repository);
     }
 

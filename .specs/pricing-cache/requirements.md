@@ -1,6 +1,6 @@
 # Pricing Cache Requirements
 
-Status: Agreed; requirements, design, and implementation tasks defined; implementation pending.
+Status: Implemented.
 
 ## Context
 
@@ -145,7 +145,7 @@ database work without introducing a separate collection cache.
 - **AC6.1 (Event-driven):** When a client posts one to 100 valid serial-number strings to
   `POST /api/v1/pricing/batch/cached` and every distinct serial has pricing, the pricing service
   shall return `200 OK` with the existing six-field pricing representation for each distinct
-  serial in first-occurrence request order.
+  serial; response array order is not guaranteed.
 - **AC6.2 (Event-driven):** When a requested serial has a valid, unexpired entry in the existing
   `pricingBySerial` cache, the pricing service shall use that entry without reading PostgreSQL or
   renewing its TTL.
@@ -153,9 +153,9 @@ database work without introducing a separate collection cache.
   pricing, the pricing service shall read PostgreSQL and attempt to populate the existing
   per-serial cache entry without creating a batch cache.
 - **AC6.4 (Unwanted):** If any requested serial has no pricing in either source, then the pricing
-  service shall stop at the first missing distinct serial and return the existing `404
-  PRICING_NOT_FOUND` Problem Details response without a partial pricing list or a negative cache
-  entry.
+  service shall return the existing `404 PRICING_NOT_FOUND` Problem Details response naming one
+  missing serial without a partial pricing list or a negative cache entry; which missing serial
+  is named is not guaranteed.
 - **AC6.5 (Unwanted):** If the batch body is not a JSON array of one to 100 valid serial-number
   strings, then the pricing service shall return `400` Problem Details before reading Redis or
   PostgreSQL.
@@ -163,9 +163,33 @@ database work without introducing a separate collection cache.
   pricing service shall use PostgreSQL fallback for affected serials and preserve the same
   `200` or `404` outcome it would provide with Redis available.
 - **AC6.7 (Ubiquitous):** The Pricing OpenAPI document shall describe the batch request array,
-  ordered `PricingDTO` response array, and `200`, `400`, `404`, `406`, `415`, and `500` outcomes.
+  unordered `PricingDTO` response array, and `200`, `400`, `404`, `406`, `415`, and `500` outcomes.
 - **AC6.8 (Ubiquitous):** The repository README shall document a copyable batch request and its
   deduplication, limit, all-or-nothing response, and shared-cache behavior.
+
+### US7 - Read cached batches in bulk
+
+As a pricing consumer requesting many prices, I want cache and database misses handled in bulk so
+that the number of read operations does not grow linearly with the number of serials.
+
+- **AC7.1 (Event-driven):** When a valid cached batch is requested, the pricing service shall
+  perform one Redis `MGET` for its distinct serials, use valid cached entries without renewing
+  their TTL, and preserve the existing single-item cache key and value format.
+- **AC7.2 (Event-driven):** When the batch contains cache misses, the pricing service shall read
+  all misses with one PostgreSQL bulk repository call and attempt to cache every positive result
+  at its individual expiring key, including when another serial causes a batch `404`.
+- **AC7.3 (Unwanted):** If the bulk Redis read fails, then the pricing service shall read all
+  distinct serials from PostgreSQL in bulk, skip cache writes for that request, and preserve the
+  resulting `200` or `404` response.
+- **AC7.4 (Unwanted):** If a batch cache write fails, then the pricing service shall skip its
+  remaining cache writes and preserve the PostgreSQL-derived `200` or `404` response.
+- **AC7.5 (Unwanted):** If any Redis value in a batch cannot be deserialized, then the pricing
+  service shall treat the entire cache read as failed, load all distinct serials with one
+  PostgreSQL bulk call, skip cache writes for that request, and preserve the resulting `200` or
+  `404` response.
+- **AC7.6 (Ubiquitous):** The pricing service shall publish bounded batch hit, miss, error, and
+  size metrics without using serial numbers as metric tags; single-item cache statistics remain
+  scoped to the annotation-driven single-item path.
 
 ## Out of scope
 
@@ -210,9 +234,16 @@ justified in `design.md`.
 10. **Missing pricing:** Fail the whole batch with the existing `404` rather than a partial list.
     See `design.md` §2.4 and §5.5.
 11. **Batch bound:** Accept one to 100 input elements before deduplication. See `design.md` §2.4.
-12. **Duplicate serials:** Deduplicate case-sensitively and retain first-occurrence order. See
+12. **Duplicate serials:** Deduplicate case-sensitively; response order is not guaranteed. See
     `design.md` §2.4.
-13. **Lookup approach:** Call the existing proxied per-serial cache method once per distinct
-    serial instead of adding bulk Redis or PostgreSQL I/O. See `design.md` §5.5.
-14. **Missing detail:** Stop at the first missing distinct serial and reuse its existing
-    `PRICING_NOT_FOUND` Problem Details response. See `design.md` §2.4 and §5.5.
+13. **Lookup approach:** Use one standalone-Redis `MGET` and one PostgreSQL bulk query for misses,
+    while preserving per-serial keys and per-key writes. See `design.md` §5.5.
+14. **Missing detail:** Return one existing `PRICING_NOT_FOUND` Problem Details response for any
+    missing serial, without promising which missing serial is named. See `design.md` §2.4 and §5.5.
+15. **Failed batch warming:** Cache all found database prices even when the batch returns `404`;
+    after an `MGET` or batch deserialization failure, skip all puts, and after the first put
+    failure, skip remaining puts. See `design.md` §5.5.
+16. **Redis topology:** This bulk path targets standalone Redis and does not change keys for
+    Redis Cluster support. See `design.md` §4.1 and §5.5.
+17. **Observability:** Use separate bounded metrics for bulk reads rather than treating them as
+    annotation-driven per-key cache statistics. See `design.md` §5.5.

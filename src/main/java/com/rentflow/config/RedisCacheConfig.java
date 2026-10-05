@@ -14,8 +14,10 @@ import org.springframework.core.Ordered;
 import org.springframework.data.redis.cache.RedisCacheConfiguration;
 import org.springframework.data.redis.cache.RedisCacheWriter;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
+import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.data.redis.serializer.JacksonJsonRedisSerializer;
 import org.springframework.data.redis.serializer.RedisSerializationContext;
+import org.springframework.data.redis.serializer.StringRedisSerializer;
 
 import com.rentflow.model.PricingCacheEntry;
 import com.rentflow.service.PricingCacheService;
@@ -33,8 +35,27 @@ public class RedisCacheConfig implements CachingConfigurer {
     }
 
     @Bean
+    public JacksonJsonRedisSerializer<PricingCacheEntry> pricingCacheValueSerializer(ObjectMapper objectMapper) {
+        return new JacksonJsonRedisSerializer<>(objectMapper, PricingCacheEntry.class);
+    }
+
+    @Bean
+    public RedisTemplate<String, PricingCacheEntry> pricingCacheRedisTemplate(
+            RedisConnectionFactory connectionFactory,
+            JacksonJsonRedisSerializer<PricingCacheEntry> pricingCacheValueSerializer) {
+        RedisTemplate<String, PricingCacheEntry> redisTemplate = new RedisTemplate<>();
+        redisTemplate.setConnectionFactory(connectionFactory);
+        redisTemplate.setKeySerializer(StringRedisSerializer.UTF_8);
+        redisTemplate.setValueSerializer(pricingCacheValueSerializer);
+        redisTemplate.afterPropertiesSet();
+        return redisTemplate;
+    }
+
+    @Bean
     public RedisCacheManagerBuilderCustomizer pricingCacheManagerBuilderCustomizer(
-            CacheProperties cacheProperties, ObjectMapper objectMapper, RedisConnectionFactory connectionFactory) {
+            CacheProperties cacheProperties,
+            RedisConnectionFactory connectionFactory,
+            JacksonJsonRedisSerializer<PricingCacheEntry> pricingCacheValueSerializer) {
         Duration timeToLive = cacheProperties.getRedis().getTimeToLive();
         requirePositiveTimeToLive(timeToLive);
         if (!cacheProperties.getCacheNames().equals(List.of(PricingCacheService.CACHE_NAME))) {
@@ -42,11 +63,10 @@ public class RedisCacheConfig implements CachingConfigurer {
                     "Pricing cache names must contain only " + PricingCacheService.CACHE_NAME);
         }
 
-        JacksonJsonRedisSerializer<PricingCacheEntry> valueSerializer =
-                new JacksonJsonRedisSerializer<>(objectMapper, PricingCacheEntry.class);
         return builder -> {
             RedisCacheConfiguration cacheConfiguration = builder.cacheDefaults()
-                    .serializeValuesWith(RedisSerializationContext.SerializationPair.fromSerializer(valueSerializer));
+                    .serializeValuesWith(
+                            RedisSerializationContext.SerializationPair.fromSerializer(pricingCacheValueSerializer));
             builder.withCacheConfiguration(PricingCacheService.CACHE_NAME, cacheConfiguration)
                     .cacheWriter(
                             RedisCacheWriter.create(connectionFactory, configurer -> configurer.immediateWrites(true)))

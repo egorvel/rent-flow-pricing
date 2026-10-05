@@ -22,7 +22,9 @@ import com.rentflow.service.PricingNotFoundException;
 import com.rentflow.service.PricingService;
 
 import static org.hamcrest.Matchers.aMapWithSize;
+import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.not;
 import static org.mockito.Mockito.verify;
@@ -104,12 +106,12 @@ class PricingControllerTest {
     }
 
     @Test
-    void batchDeduplicatesCaseSensitivelyAndReturnsFullPricingInFirstOccurrenceOrder() throws Exception {
+    void batchDeduplicatesCaseSensitivelyAndReturnsFullPricingWithoutPromisingOrder() throws Exception {
         when(service.getCachedBatch(List.of("SAW-002", "DRILL-001", "saw-002")))
                 .thenReturn(List.of(
-                        PricingCacheEntry.from(pricing("SAW-002", "75.00")),
+                        PricingCacheEntry.from(pricing("saw-002", "80.00")),
                         PricingCacheEntry.from(pricing("DRILL-001", "125.50")),
-                        PricingCacheEntry.from(pricing("saw-002", "80.00"))));
+                        PricingCacheEntry.from(pricing("SAW-002", "75.00"))));
         when(service.getCached("batch")).thenReturn(PricingCacheEntry.from(pricing("batch", "50.00")));
 
         mockMvc.perform(post("/api/v1/pricing/batch/cached")
@@ -118,15 +120,13 @@ class PricingControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(content().contentType(MediaType.APPLICATION_JSON))
                 .andExpect(jsonPath("$", hasSize(3)))
-                .andExpect(jsonPath("$[0].serialNumber").value("SAW-002"))
+                .andExpect(jsonPath("$[*].serialNumber", containsInAnyOrder("SAW-002", "DRILL-001", "saw-002")))
                 .andExpect(jsonPath("$[0]", aMapWithSize(6)))
-                .andExpect(jsonPath("$[0].price").value(75.00))
-                .andExpect(jsonPath("$[0].weekendRate").value(1.2500))
-                .andExpect(jsonPath("$[0].longRentalCondition").value(7))
-                .andExpect(jsonPath("$[0].longRentalDiscount").value(0.1000))
-                .andExpect(jsonPath("$[0].deposit").value(300.00))
-                .andExpect(jsonPath("$[1].serialNumber").value("DRILL-001"))
-                .andExpect(jsonPath("$[2].serialNumber").value("saw-002"))
+                .andExpect(jsonPath("$[?(@.serialNumber == 'SAW-002')].price", hasItem(75.00)))
+                .andExpect(jsonPath("$[?(@.serialNumber == 'SAW-002')].weekendRate", hasItem(1.2500)))
+                .andExpect(jsonPath("$[?(@.serialNumber == 'SAW-002')].longRentalCondition", hasItem(7)))
+                .andExpect(jsonPath("$[?(@.serialNumber == 'SAW-002')].longRentalDiscount", hasItem(0.1000)))
+                .andExpect(jsonPath("$[?(@.serialNumber == 'SAW-002')].deposit", hasItem(300.00)))
                 .andExpect(header().doesNotExist("X-Cache"));
         mockMvc.perform(get("/api/v1/pricing/batch/cached"))
                 .andExpect(status().isOk())

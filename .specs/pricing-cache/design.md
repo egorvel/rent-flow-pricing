@@ -1,6 +1,6 @@
 # Pricing Cache Design
 
-Status: Agreed; requirements, design, and implementation tasks defined; implementation pending.
+Status: Implemented.
 
 This document implements `requirements.md`. Numbered sections are stable traceability targets.
 Shared pricing, persistence, error, and platform foundations are linked instead of repeated.
@@ -37,7 +37,7 @@ The implementation extends the existing packages without adding a new applicatio
 | `com.rentflow.controller` | `PricingController` | Bind and document single and batch cached retrieval |
 | `com.rentflow.converter` | `PricingConverter` | Map both authoritative entities and cache entries to the shared `PricingDTO` response |
 | `com.rentflow.service` | `PricingService` | Keep authoritative reads and evict the affected key after successful mutations |
-| `com.rentflow.service` | `PricingCacheService` | Execute the proxied cache-aside lookup |
+| `com.rentflow.service` | `PricingCacheService` | Execute the proxied single lookup and bulk cache/database reads |
 | `com.rentflow.model` | `PricingCacheEntry` | Immutable Redis payload and conversion boundary |
 | `com.rentflow.config` | `RedisCacheConfig`, `PricingCacheErrorHandler` | Configure Redis caching and fail-open errors |
 | `com.rentflow.repository` | `PricingRepository` | Load cache misses from PostgreSQL |
@@ -98,16 +98,18 @@ GET /api/v1/pricing/{serialNumber}/cached
   -> PricingDTO
 ```
 
-Batch retrieval follows the same per-serial path without a second cache:
+Batch retrieval uses the same per-serial keys without a second cache:
 
 ```text
 POST /api/v1/pricing/batch/cached
-  -> validate the complete JSON array and deduplicate in first-occurrence order
+  -> validate the complete JSON array and deduplicate case-sensitively
   -> PricingService.getCachedBatch
-  -> proxied PricingCacheService.get for each distinct serial
-  -> existing Redis key or PostgreSQL miss path for that serial
+  -> PricingCacheService.getBatch
+       -> Redis MGET for distinct per-serial keys
+       -> one PricingRepository.findAllById for misses
+       -> best-effort per-key cache puts for positive database results
   -> PricingConverter.toResponse(PricingCacheEntry) for each result
-  -> ordered JSON array of PricingDTO
+  -> JSON array of PricingDTO (order unspecified)
 ```
 
 Mutation invalidation is commit-aware:
@@ -181,17 +183,18 @@ one to 100 case-sensitive serial-number strings, for example
 `["DRILL-001","SAW-002"]`. The bound applies to the input element count before deduplication.
 Each element must be a JSON string matching `PricingDTO.SERIAL_NUMBER_PATTERN`; null, blank,
 non-string, and invalid-pattern elements are rejected. The controller validates the entire body
-before any Redis or PostgreSQL lookup, then deduplicates with first-occurrence order preserved.
+before any Redis or PostgreSQL lookup, then deduplicates case-sensitively.
 `DRILL-001` and `drill-001` remain distinct.
 
 A successful response is a bare JSON array of the existing six-field `PricingDTO` values, one
-per distinct serial in first-occurrence order. There is no aggregate cache key, batch DTO,
+per distinct serial; array order is not guaranteed, and callers match entries by serial number.
+There is no aggregate cache key, batch DTO,
 source header, page wrapper, or calculated rental-price field.
 
 | Condition | Status and body |
 | --- | --- |
-| Every distinct serial has pricing | `200 OK` and ordered `PricingDTO[]` |
-| First distinct serial missing from both cache and PostgreSQL | Existing `404 PRICING_NOT_FOUND` Problem Details for that serial; no partial response |
+| Every distinct serial has pricing | `200 OK` and unordered `PricingDTO[]` |
+| Any distinct serial missing from both cache and PostgreSQL | Existing `404 PRICING_NOT_FOUND` Problem Details naming any missing serial; no partial response |
 | Invalid JSON or non-array/empty/oversized/invalid element | `400 Bad Request` Problem Details; no lookup |
 | Unsupported request media type | Existing `415 Unsupported Media Type` Problem Details |
 | Unacceptable response type | Existing `406 Not Acceptable` Problem Details |
@@ -236,9 +239,10 @@ The stored value is readable JSON with the six lower-camel-case fields and no Ja
 moving the record's package does not change the existing JSON format or require a new key
 namespace. A pre-existing entry with that format remains readable. Decimal values remain
 JSON numbers and deserialize directly to `BigDecimal`; application calculations never use their
-textual Redis representation. A malformed, incompatible, or wrong-type payload produces a cache
-get error, which §4.3 treats as a miss; the PostgreSQL result then replaces it when the subsequent
-cache put succeeds.
+textual Redis representation. On the single-item path, a malformed, incompatible, or wrong-type
+payload produces a cache get error, which §4.3 treats as a miss; the PostgreSQL result then
+replaces it when the subsequent cache put succeeds. On the batch path, §5.5's typed `MGET`
+deserialization fails the whole cache read and deliberately skips cache puts for that request.
 
 ### 3.3 Cache name, key, and expiration
 
@@ -284,9 +288,15 @@ applies that typed configuration to each declared cache. The default key seriali
 non-locking writer with immediate writes for put and eviction. `CachingConfigurer` continues to
 install the fail-open error handler from §4.3.
 
+The same `JacksonJsonRedisSerializer<PricingCacheEntry>` bean configures a dedicated typed
+`RedisTemplate<String, PricingCacheEntry>`. The batch path uses its `ValueOperations.multiGet`
+instead of handling raw key/value bytes. Physical batch keys still use the prefix obtained from
+the active `RedisCacheConfiguration`, so the template and annotation-driven cache address the
+same entries without duplicating the prefix in Java.
+
 `@Cacheable` uses its default `sync = false`. No locking `RedisCacheWriter`, distributed mutex,
-Lua script, or local single-flight map is added. The application performs only one-key `GET`,
-`SET` with expiration, and `DEL` operations.
+Lua script, or local single-flight map is added. The application performs one-key `GET`, `SET`
+with expiration, and `DEL` operations, plus `MGET` for batch retrieval.
 
 ### 4.2 Connection and timeout defaults
 
@@ -426,19 +436,39 @@ value only when no cache fill for that serial overlaps the mutation.
 
 ### 5.5 Batch orchestration and failure boundaries
 
-`PricingService.getCachedBatch(List<String>)` is a non-transactional orchestration method. It
-iterates the already validated, deduplicated serials in order and calls the injected
-`PricingCacheService.get` Spring bean once for each. Each hit skips PostgreSQL; each miss uses
-the existing read-only transaction and best-effort cache put. This first version intentionally
-uses one Redis lookup per distinct serial and one PostgreSQL query per miss, bounded by the
-100-element request limit; it does not introduce `MGET`, `findAllById`, or bulk cache plumbing.
+`PricingService.getCachedBatch(List<String>)` remains non-transactional and delegates to
+`PricingCacheService.getBatch`. The latter uses the configured `RedisCache` to derive the exact
+key prefix, constructs the existing physical per-serial key strings, and passes them to a typed
+`RedisTemplate<String, PricingCacheEntry>.opsForValue().multiGet(...)`. The template performs one
+`MGET` and applies the same typed Jackson serializer as `RedisCache`; application code does not
+serialize keys or deserialize JSON manually. Its ordered reply is paired with the corresponding
+requested keys internally even though HTTP response order is unspecified. If any value cannot be
+deserialized, the typed template fails the whole operation: the batch records one cache get and
+decode error, treats every distinct serial as a miss, loads them in one PostgreSQL call, and skips
+all cache puts for that request. Other batch read errors follow the same fallback but increment
+the read-error meter.
 
-The first `PricingNotFoundException` aborts processing and maps to the existing
-`PRICING_NOT_FOUND` response. Earlier successful misses may already have populated their
-individual cache entries despite the batch's `404`; cache warming is not an atomic business
-operation, and no partial HTTP list is returned. Redis get/put failures still fail open through
-§4.3, so PostgreSQL determines the `200` or `404` result. No batch-wide transaction or atomic
-snapshot is promised: returned entries can have different ages within the existing TTL.
+The distinct miss set is loaded with one `PricingRepository.findAllById` call and mapped by
+serial number because JPA does not promise result order. The repository call owns its read-only
+transaction; no transaction spans Redis and PostgreSQL. All found database entries are written
+through the configured Spring `Cache.put`, preserving typed JSON, TTL, and the existing keys,
+including when another serial makes the response a `404`. If `MGET` or its typed deserialization
+fails, all distinct serials are read from PostgreSQL and cache puts are skipped for that request.
+If a put fails, its error is recorded and remaining puts are skipped. A database error propagates
+normally.
+
+After reading and optional warming, any missing serial produces the existing
+`PricingNotFoundException` and one `PRICING_NOT_FOUND` response; which missing serial is named
+is not guaranteed. No partial array or negative cache entry is returned. No batch-wide atomic
+snapshot is promised: cached entries can have different ages within the existing TTL. The
+existing standalone Redis keys are retained; cross-slot Redis Cluster `MGET` is out of scope.
+
+Bulk calls bypass annotation-driven per-key cache statistics. Separate Micrometer meters record
+`pricing.cache.batch.entries{outcome=hit|miss}` per distinct serial,
+`pricing.cache.batch.errors{operation=read|decode|put}` per failed operation, and a
+`pricing.cache.batch.size` summary for distinct batch size. These fixed tags never contain a
+serial number. Existing `pricing.cache.errors` counters also record suppressed bulk read and
+put failures, while single-item cache statistics retain their current meaning.
 
 ## 6. Mutation invalidation
 
@@ -521,8 +551,9 @@ The README adds:
 - Redis host, port, timeout, and TTL environment variables;
 - local Compose startup and Redis inspection commands;
 - the fact that no cache-source header is returned; and
-- an executable batch request with the 100-input limit, first-occurrence deduplication,
-  all-or-nothing `404`, and shared per-serial cache behavior.
+- an executable batch request with the 100-input limit, case-sensitive deduplication,
+  unspecified output order and missing-serial selection, all-or-nothing `404`, and shared
+  per-serial cache behavior.
 
 No Redis credential or production topology example is committed.
 
@@ -540,8 +571,9 @@ Unit tests use JUnit, AssertJ, and Mockito without a Spring context:
 | `PricingCacheErrorHandlerTest` | Get, put, evict, and clear failures are suppressed and increment only their bounded error counter |
 | `PricingServiceTest` | Authoritative get still uses the repository; cached get delegates; mutations retain their existing behavior |
 | `PricingCacheEvictionAnnotationsTest` | All three write methods evict only their serial key after successful invocation |
-| `PricingServiceTest` batch cases | Ordered delegation once per distinct serial and immediate propagation of the first missing result |
-| `PricingControllerTest` batch cases | Full-body validation before lookup, ordered full DTOs, and existing Problem Details contracts |
+| `PricingServiceTest` batch cases | Delegation to the bulk cache method without a batch-wide transaction |
+| `PricingCacheServiceTest` batch cases | One MGET, zero-or-one bulk database call, per-key warming, fail-open behavior, and bounded metrics |
+| `PricingControllerTest` batch cases | Full-body validation before lookup, complete unordered DTOs, and existing Problem Details contracts |
 
 Tests call production methods with explicit Java types and verify collaborators rather than
 starting Spring merely to exercise business orchestration.
@@ -563,11 +595,12 @@ Redis keys and TTL, and repository spy interactions:
 - cache metrics record hits, misses, and evictions without adding HTTP headers; and
 - an out-of-band PostgreSQL update remains hidden on cached retrieval but is visible through the
   authoritative endpoint until expiry or eviction;
-- single and batch endpoints share keys in both directions; a mixed batch reads PostgreSQL only
-  for missing entries, preserves first-occurrence order, and leaves TTLs unrenewed on hits;
-- a batch with an invalid body performs no lookup, while a missing serial returns the existing
-  first-missing `404` without a negative entry; and
-- batch retrieval falls back per serial during Redis outages and reflects API mutation eviction.
+- single and batch endpoints share keys in both directions; a mixed batch uses one `MGET` and
+  one bulk PostgreSQL call for misses without renewing hit TTLs;
+- a batch with an invalid body performs no lookup, while any missing serial returns the existing
+  `404` without a negative entry and all found prices may still be warmed; and
+- batch retrieval falls back with one bulk PostgreSQL call during Redis outages, skips repeated
+  cache writes, and reflects API mutation eviction.
 
 `PricingCacheUnavailableIT` starts a real Redis Testcontainer, warms the application, then stops
 that container before exercising one end-to-end outage scenario. It proves authoritative
@@ -612,5 +645,6 @@ The final implementation must pass `mvn -B -ntp clean verify` with Java 25 and D
 | AC6.1-AC6.4 | §2.4, §3.3, §5.5 |
 | AC6.5-AC6.6 | §2.4, §4.3, §5.5 |
 | AC6.7-AC6.8 | §8, §9.3 |
+| AC7.1-AC7.6 | §3.2-§3.3, §5.5, §9.1-§9.2 |
 
 No requirement changes the PostgreSQL schema or requires a Flyway migration.

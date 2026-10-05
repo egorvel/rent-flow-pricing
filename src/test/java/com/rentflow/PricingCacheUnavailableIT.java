@@ -28,6 +28,7 @@ import io.micrometer.core.instrument.MeterRegistry;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
@@ -101,6 +102,7 @@ class PricingCacheUnavailableIT extends PostgresIntegrationTest {
 
         double getErrorsBefore = cacheErrors("get");
         double putErrorsBefore = cacheErrors("put");
+        double batchReadErrorsBefore = batchErrors("read");
         mockMvc.perform(get("/api/v1/pricing/OUTAGE-CACHED/cached"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.price").value(125.00))
@@ -114,15 +116,15 @@ class PricingCacheUnavailableIT extends PostgresIntegrationTest {
                         .content("[\"OUTAGE-AUTH\",\"OUTAGE-CACHED\",\"OUTAGE-AUTH\"]"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.length()").value(2))
-                .andExpect(jsonPath("$[0].serialNumber").value("OUTAGE-AUTH"))
-                .andExpect(jsonPath("$[1].serialNumber").value("OUTAGE-CACHED"));
+                .andExpect(jsonPath("$[*].serialNumber", containsInAnyOrder("OUTAGE-AUTH", "OUTAGE-CACHED")));
         mockMvc.perform(post("/api/v1/pricing/batch/cached")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("[\"OUTAGE-AUTH\",\"OUTAGE-MISSING\",\"OUTAGE-CACHED\"]"))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.code").value("PRICING_NOT_FOUND"));
-        assertThat(cacheErrors("get")).isGreaterThanOrEqualTo(getErrorsBefore + 6.0);
-        assertThat(cacheErrors("put")).isGreaterThanOrEqualTo(putErrorsBefore + 4.0);
+        assertThat(cacheErrors("get")).isGreaterThanOrEqualTo(getErrorsBefore + 4.0);
+        assertThat(cacheErrors("put")).isGreaterThanOrEqualTo(putErrorsBefore + 1.0);
+        assertThat(batchErrors("read")).isEqualTo(batchReadErrorsBefore + 2.0);
 
         double evictErrorsBefore = cacheErrors("evict");
         mockMvc.perform(post("/api/v1/pricing")
@@ -155,6 +157,14 @@ class PricingCacheUnavailableIT extends PostgresIntegrationTest {
     private double cacheErrors(String operation) {
         return meterRegistry
                 .get("pricing.cache.errors")
+                .tag("operation", operation)
+                .counter()
+                .count();
+    }
+
+    private double batchErrors(String operation) {
+        return meterRegistry
+                .get("pricing.cache.batch.errors")
                 .tag("operation", operation)
                 .counter()
                 .count();

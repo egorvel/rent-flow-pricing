@@ -2,6 +2,7 @@ package com.rentflow;
 
 import java.math.BigDecimal;
 import java.time.Duration;
+import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
@@ -43,6 +44,8 @@ import tools.jackson.databind.ObjectMapper;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.aMapWithSize;
+import static org.hamcrest.Matchers.containsInAnyOrder;
+import static org.hamcrest.Matchers.hasItem;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.never;
@@ -202,22 +205,25 @@ class PricingCacheIT extends PostgresIntegrationTest {
         warm("BATCH-WARM");
         Long originalTtl = redisTemplate.getExpire(cacheKey("BATCH-WARM"), TimeUnit.MILLISECONDS);
         reset(repository);
+        double hitsBefore = batchEntries("hit");
+        double missesBefore = batchEntries("miss");
+        double batchSizeBefore =
+                meterRegistry.get("pricing.cache.batch.size").summary().totalAmount();
 
         mockMvc.perform(post("/api/v1/pricing/batch/cached")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("[\"BATCH-WARM\",\"BATCH-MISS\",\"BATCH-WARM\",\"BATCH-LAST\"]"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.length()").value(3))
-                .andExpect(jsonPath("$[0].serialNumber").value("BATCH-WARM"))
-                .andExpect(jsonPath("$[0].price").value(100.00))
-                .andExpect(jsonPath("$[1].serialNumber").value("BATCH-MISS"))
-                .andExpect(jsonPath("$[1].price").value(125.00))
-                .andExpect(jsonPath("$[2].serialNumber").value("BATCH-LAST"))
-                .andExpect(jsonPath("$[2].price").value(150.00));
+                .andExpect(jsonPath("$[*].serialNumber", containsInAnyOrder("BATCH-WARM", "BATCH-MISS", "BATCH-LAST")))
+                .andExpect(jsonPath("$[?(@.serialNumber == 'BATCH-WARM')].price", hasItem(100.00)))
+                .andExpect(jsonPath("$[?(@.serialNumber == 'BATCH-MISS')].price", hasItem(125.00)))
+                .andExpect(jsonPath("$[?(@.serialNumber == 'BATCH-LAST')].price", hasItem(150.00)));
 
         verify(repository, never()).findById("BATCH-WARM");
-        verify(repository, times(1)).findById("BATCH-MISS");
-        verify(repository, times(1)).findById("BATCH-LAST");
+        verify(repository, times(1)).findAllById(List.of("BATCH-MISS", "BATCH-LAST"));
+        verify(repository, never()).findById("BATCH-MISS");
+        verify(repository, never()).findById("BATCH-LAST");
         assertThat(redisTemplate.getExpire(cacheKey("BATCH-WARM"), TimeUnit.MILLISECONDS))
                 .isPositive()
                 .isLessThanOrEqualTo(originalTtl);
@@ -227,11 +233,15 @@ class PricingCacheIT extends PostgresIntegrationTest {
         mockMvc.perform(get("/api/v1/pricing/BATCH-MISS/cached"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.price").value(125.00));
-        verify(repository, times(1)).findById("BATCH-MISS");
+        verify(repository, never()).findById("BATCH-MISS");
+        assertThat(batchEntries("hit")).isEqualTo(hitsBefore + 1.0);
+        assertThat(batchEntries("miss")).isEqualTo(missesBefore + 2.0);
+        assertThat(meterRegistry.get("pricing.cache.batch.size").summary().totalAmount())
+                .isEqualTo(batchSizeBefore + 3.0);
     }
 
     @Test
-    void missingBatchSerialReturnsOneProblemWithoutCachingAbsenceOrLookingPastIt() throws Exception {
+    void missingBatchSerialReturnsOneProblemAfterWarmingEveryFoundMiss() throws Exception {
         save("BATCH-FIRST", "100.00");
         save("BATCH-LATER", "200.00");
         reset(repository);
@@ -242,17 +252,51 @@ class PricingCacheIT extends PostgresIntegrationTest {
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.code").value("PRICING_NOT_FOUND"));
 
-        verify(repository, times(1)).findById("BATCH-FIRST");
-        verify(repository, times(1)).findById("BATCH-MISSING");
+        verify(repository, times(1)).findAllById(List.of("BATCH-FIRST", "BATCH-MISSING", "BATCH-LATER"));
+        verify(repository, never()).findById("BATCH-FIRST");
+        verify(repository, never()).findById("BATCH-MISSING");
         verify(repository, never()).findById("BATCH-LATER");
         assertThat(redisTemplate.hasKey(cacheKey("BATCH-FIRST"))).isTrue();
         assertThat(redisTemplate.hasKey(cacheKey("BATCH-MISSING"))).isFalse();
-        assertThat(redisTemplate.hasKey(cacheKey("BATCH-LATER"))).isFalse();
+        assertThat(redisTemplate.hasKey(cacheKey("BATCH-LATER"))).isTrue();
 
         mockMvc.perform(get("/api/v1/pricing/BATCH-FIRST/cached"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.price").value(100.00));
-        verify(repository, times(1)).findById("BATCH-FIRST");
+        mockMvc.perform(get("/api/v1/pricing/BATCH-LATER/cached"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.price").value(200.00));
+        verify(repository, never()).findById("BATCH-FIRST");
+        verify(repository, never()).findById("BATCH-LATER");
+    }
+
+    @Test
+    void corruptBatchEntryFallsBackForTheWholeBatchAndSkipsCacheWrites() throws Exception {
+        save("BATCH-VALID", "100.00");
+        save("BATCH-CORRUPT", "200.00");
+        warm("BATCH-VALID");
+        redisTemplate.opsForValue().set(cacheKey("BATCH-CORRUPT"), "not-json", TEST_TTL);
+        reset(repository);
+        double hitsBefore = batchEntries("hit");
+        double missesBefore = batchEntries("miss");
+        double decodeErrorsBefore = batchErrors("decode");
+
+        mockMvc.perform(post("/api/v1/pricing/batch/cached")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("[\"BATCH-VALID\",\"BATCH-CORRUPT\"]"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[*].serialNumber", containsInAnyOrder("BATCH-VALID", "BATCH-CORRUPT")))
+                .andExpect(jsonPath("$[?(@.serialNumber == 'BATCH-VALID')].price", hasItem(100.00)))
+                .andExpect(jsonPath("$[?(@.serialNumber == 'BATCH-CORRUPT')].price", hasItem(200.00)));
+
+        verify(repository, times(1)).findAllById(List.of("BATCH-VALID", "BATCH-CORRUPT"));
+        verify(repository, never()).findById("BATCH-VALID");
+        verify(repository, never()).findById("BATCH-CORRUPT");
+        assertThat(batchEntries("hit")).isEqualTo(hitsBefore);
+        assertThat(batchEntries("miss")).isEqualTo(missesBefore + 2.0);
+        assertThat(batchErrors("decode")).isEqualTo(decodeErrorsBefore + 1.0);
+        assertThat(redisTemplate.opsForValue().get(cacheKey("BATCH-CORRUPT"))).isEqualTo("not-json");
+        assertThat(redisTemplate.opsForValue().get(cacheKey("BATCH-VALID"))).contains("BATCH-VALID");
     }
 
     @Test
@@ -441,6 +485,22 @@ class PricingCacheIT extends PostgresIntegrationTest {
 
     private RedisCache redisCache() {
         return (RedisCache) cacheManager.getCache(PricingCacheService.CACHE_NAME);
+    }
+
+    private double batchEntries(String outcome) {
+        return meterRegistry
+                .get("pricing.cache.batch.entries")
+                .tag("outcome", outcome)
+                .counter()
+                .count();
+    }
+
+    private double batchErrors(String operation) {
+        return meterRegistry
+                .get("pricing.cache.batch.errors")
+                .tag("operation", operation)
+                .counter()
+                .count();
     }
 
     private String cacheKey(String serialNumber) {

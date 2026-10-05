@@ -251,8 +251,8 @@ public class PricingController {
     @Operation(
             operationId = "getCachedPricingBatch",
             summary = "Retrieve cached pricing for a batch",
-            description = "Uses the existing per-serial cache; duplicates are removed in first-occurrence order."
-                    + " Returns the first missing serial as a 404 without a partial list.")
+            description = "Uses bulk reads over the existing per-serial cache; duplicates are removed case-sensitively."
+                    + " Response order is unspecified. Any missing serial produces a 404 without a partial list.")
     @ApiResponses({
         @ApiResponse(
                 responseCode = "200",
@@ -270,7 +270,7 @@ public class PricingController {
                                 schema = @Schema(implementation = ProblemResponse.class))),
         @ApiResponse(
                 responseCode = "404",
-                description = "Pricing does not exist for the first missing serial number.",
+                description = "Pricing does not exist for at least one requested serial number.",
                 content =
                         @Content(
                                 mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,

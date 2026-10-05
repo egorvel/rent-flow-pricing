@@ -193,10 +193,12 @@ Pricing provides an authoritative retrieval path and two cached retrieval paths:
   array of the same six-field pricing objects.
 
 The batch limit counts input elements before duplicates are removed. Duplicate serial numbers
-are looked up and returned only once, in first-occurrence order; matching is case-sensitive.
-If any serial is missing, the whole batch returns `404 PRICING_NOT_FOUND` instead of a partial
-array. The batch creates no separate cache entry: it reads and warms the same per-serial keys
-as the single-item cached endpoint.
+are looked up and returned only once, and matching is case-sensitive. Response order is not
+guaranteed; use each result's `serialNumber` to match it to an item. If any serial is missing, the
+whole batch returns `404 PRICING_NOT_FOUND` instead of a partial array. When several serials are
+missing, which one is named in the problem response is not guaranteed. The batch creates no
+separate cache entry: one bulk Redis read and, for misses, one bulk PostgreSQL read reuse and warm
+the same per-serial keys as the single-item cached endpoint.
 
 The cached endpoint stores only successful pricing lookups. Missing serial numbers are not
 cached, so each `404` is checked against PostgreSQL. A cached value has a fixed, non-renewing TTL:

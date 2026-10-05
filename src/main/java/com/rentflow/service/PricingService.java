@@ -54,11 +54,7 @@ public class PricingService {
     }
 
     public List<PricingCacheEntry> getCachedBatch(List<String> serialNumbers) {
-        List<PricingCacheEntry> entries = new ArrayList<>(serialNumbers.size());
-        for (String serialNumber : serialNumbers) {
-            entries.add(cacheService.get(serialNumber));
-        }
-        return entries;
+        return cacheService.getBatch(serialNumbers);
     }
 
     @Transactional(readOnly = true)

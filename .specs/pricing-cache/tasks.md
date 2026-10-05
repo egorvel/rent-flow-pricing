@@ -1,6 +1,6 @@
 # Pricing Cache Implementation Tasks
 
-Status: Agreed; T1-T6 defined.
+Status: Agreed; T7 is implemented and replaces the initial sequential batch read path.
 
 ## 1. Delivery rules
 
@@ -27,13 +27,15 @@ flowchart TD
     T3 --> T4["T4 Real-Redis and outage verification"]
     T4 --> T5["T5 Compose, API documentation, and acceptance"]
     T5 --> T6["T6 Cached batch retrieval"]
+    T6 --> T7["T7 Bulk cached batch reads"]
     PC2["Price Creation T2 smoke prerequisite"] --> T5
 ```
 
 The feature path is intentionally linear. T1 makes Redis optional and fail-open before any HTTP
 operation can use it; T2 adds reads; T3 adds write-side invalidation; T4 proves both with real
 infrastructure; T5 publishes and smoke-tests the initial contract; and T6 extends it with bounded
-batch retrieval through the same per-serial cache. T5 also depends on Price
+batch retrieval through the same per-serial cache; T7 makes its cache and database reads bulk.
+T5 also depends on Price
 Creation T2 because the shared smoke script must be able to create its pricing fixture before it
 can warm and inspect that fixture's cache entry.
 
@@ -312,7 +314,7 @@ AC4.1-AC4.4, and AC5.4; `design.md` §3.2-§3.3, §4.2-§4.4, §5,
 
 ### T6 - Add bounded cached batch retrieval
 
-**State:** Pending.
+**State:** Implemented baseline; T7 supersedes its sequential-read and ordering behavior.
 
 **Commit:** `feat: add cached batch pricing retrieval`
 
@@ -324,12 +326,12 @@ AC4.1-AC4.4, and AC5.4; `design.md` §3.2-§3.3, §4.2-§4.4, §5,
 **Scope.**
 
 - Add `POST /api/v1/pricing/batch/cached` with a bare JSON-array body, strict validation of
-  one to 100 input strings before lookup, case-sensitive first-occurrence deduplication, and
-  an ordered full-`PricingDTO` array response.
-- Add non-transactional `PricingService.getCachedBatch` orchestration over the existing proxied
-  `PricingCacheService.get`; stop at the first missing serial and reuse its existing `404`.
+  one to 100 input strings before lookup, case-sensitive deduplication, and a full-`PricingDTO`
+  array response.
+- Add non-transactional `PricingService.getCachedBatch` orchestration and reuse the existing
+  `404` for a missing serial. T7 replaces the initial sequential implementation.
 - Reuse all existing per-serial Redis keys, TTL, invalidation, metrics, and fail-open behavior;
-  add no batch cache, bulk Redis/database operation, new response model, or migration.
+  add no batch cache, new response model, or migration.
 - Extend unit, HTTP, real-Redis, outage, OpenAPI, and README coverage without changing the
   existing single-item, authoritative, listing, or write contracts.
 
@@ -339,21 +341,63 @@ AC4.1-AC4.4, and AC5.4; `design.md` §3.2-§3.3, §4.2-§4.4, §5,
   any lookup; empty, 101-element, non-array, null/non-string element, and invalid serial inputs
   return `400`, while wrong media type returns `415` (AC6.1, AC6.5).
 - [ ] A batch with case-sensitive duplicates returns one complete `PricingDTO` per distinct
-  serial in first-occurrence order, and service tests prove one proxied lookup per distinct
-  serial and no batch-wide transaction (AC6.1).
+  serial regardless of response order, and service tests prove no batch-wide transaction (AC6.1).
 - [ ] Real-Redis tests prove single-item warming serves a batch hit and batch warming serves a
   single-item hit at the unchanged key; a mixed batch consults PostgreSQL only for misses and
   does not renew hit TTLs or create an aggregate key (AC6.2-AC6.3).
-- [ ] The first missing distinct serial returns the existing `404 PRICING_NOT_FOUND` body with
-  no partial array or negative entry; later serials are not looked up, while earlier positive
-  cache fills remain usable (AC6.4).
-- [ ] Redis-outage tests prove per-serial PostgreSQL fallback preserves the batch's `200` or
-  first-missing `404`; mutation eviction is visible on the next batch request (AC6.6).
-- [ ] `OpenApiIT` proves the exact path, operation ID, bounded string-array request, ordered
+- [ ] A missing distinct serial returns the existing `404 PRICING_NOT_FOUND` body with
+  no partial array or negative entry (AC6.4).
+- [ ] Redis-outage tests prove PostgreSQL fallback preserves the batch's `200` or `404`;
+  mutation eviction is visible on the next batch request (AC6.6).
+- [ ] `OpenApiIT` proves the exact path, operation ID, bounded string-array request, unordered
   `PricingDTO` array response, and `200`, `400`, `404`, `406`, `415`, `500` statuses; README
-  includes an executable example and explains limit, deduplication, first-missing `404`, and
+  includes an executable example and explains limit, deduplication, all-or-nothing `404`, and
   shared cache (AC6.7-AC6.8).
 - [ ] `mvn -B -ntp clean verify` reports `BUILD SUCCESS` with no skip flags.
+
+### T7 - Replace sequential batch reads with bulk Redis and PostgreSQL reads
+
+**State:** Implemented.
+
+**Commit:** `feat: bulk cached pricing batch reads`
+
+**Depends on:** T6.
+
+**Refs.** `requirements.md` AC6.1-AC6.4, AC6.6-AC6.8, AC7.1-AC7.6;
+`design.md` §1.4, §2.4, §3.2-§3.3, §4.3, §5.5, §8, and §9.1-§9.3.
+
+**Scope.**
+
+- Replace `PricingService.getCachedBatch`'s sequential loop with delegation to a bulk method on
+  `PricingCacheService`; preserve the controller's full-body validation and case-sensitive
+  deduplication but remove successful-array and missing-serial ordering promises.
+- Share one typed Jackson serializer between `RedisCache` and a dedicated
+  `RedisTemplate<String, PricingCacheEntry>`; derive physical key prefixes from the active Redis
+  cache configuration, use `ValueOperations.multiGet` for one `MGET`, one `findAllById` for
+  misses, and existing per-key `Cache.put` for found database entries. Keep the current key, TTL,
+  invalidation, single-item path, and standalone topology.
+- Fail open for read/decode/put errors as defined in `design.md` §5.5 and publish bounded batch
+  metrics without misrepresenting annotation-driven single-item cache statistics.
+- Update README, OpenAPI description, and order-dependent tests; add bulk, whole-batch
+  deserialization-fallback, outage, and metrics coverage. Add no new endpoint, aggregate cache,
+  dependency, or migration.
+
+**DoD.**
+
+- [ ] Unit tests prove one `MGET` per valid batch, zero-or-one `findAllById` call, no batch
+  `findById`, and no repository call for all-hit batches (AC7.1-AC7.2).
+- [ ] Real-Redis tests prove unchanged key bytes and typed JSON, cross-endpoint cache sharing,
+  unrenewed hit TTL, one bulk query for mixed misses, no aggregate key, and all found entries
+  warmed even when any serial yields `404` (AC6.2-AC6.4, AC7.1-AC7.2).
+- [ ] Tests compare returned entries by `serialNumber` without assuming array order and accept
+  any requested missing serial in the `404` detail; OpenAPI and README state both non-guarantees
+  while preserving exact statuses and JSON shapes (AC6.1, AC6.4, AC6.7-AC6.8).
+- [ ] A corrupt cached value or failed `MGET` causes one whole-batch database fallback with no
+  cache puts; a failed put skips later puts, with the expected `200`/`404` and bounded error
+  metrics (AC6.6, AC7.3-AC7.6).
+- [ ] Batch hit/miss/error/size meters have fixed tags and no serial identifiers, and existing
+  single-item statistics and error handling still work (AC7.6).
+- [ ] `mvn -B -ntp clean verify` reports `BUILD SUCCESS` without skip flags.
 
 ## 4. Acceptance-criteria traceability
 
@@ -376,12 +420,13 @@ AC4.1-AC4.4, and AC5.4; `design.md` §3.2-§3.3, §4.2-§4.4, §5,
 | AC5.3 | T5 Compose configuration, clean startup, and container smoke assertions |
 | AC5.4 | T4 real-Redis hit, miss, expiry, invalidation, and outage integration suite |
 | AC5.5 | T5 final unskipped Java 25 Maven lifecycle assertion |
-| AC6.1 | T6 request validation, deduplication, ordering, and full-response assertions |
-| AC6.2-AC6.3 | T6 cross-endpoint cache-sharing, mixed hit/miss, key, and TTL assertions |
-| AC6.4 | T6 first-missing response and cache-state assertions |
+| AC6.1 | T6 request validation and full-response assertions; T7 order-independent matching |
+| AC6.2-AC6.3 | T6 cross-endpoint cache-sharing assertions; T7 mixed bulk hit/miss, key, and TTL assertions |
+| AC6.4 | T6 all-or-nothing response; T7 any-missing response and cache-state assertions |
 | AC6.5 | T6 invalid-input/no-lookup and wrong-media assertions |
-| AC6.6 | T6 Redis-outage fallback and post-mutation retrieval assertions |
-| AC6.7-AC6.8 | T6 OpenAPI contract and executable README example assertions |
+| AC6.6 | T6 Redis-outage fallback; T7 one-query bulk fallback and post-mutation retrieval assertions |
+| AC6.7-AC6.8 | T6 OpenAPI contract and README example; T7 ordering-contract revision assertions |
+| AC7.1-AC7.6 | T7 MGET, bulk repository, warming, failures, and bounded metrics assertions |
 
 Every acceptance criterion is tied to a DoD assertion that becomes observably false when the
 specified behavior regresses.
@@ -389,7 +434,7 @@ specified behavior regresses.
 ## 5. Explicit exclusions and follow-up boundaries
 
 - Do not fix, suppress, retry, or weaken the pre-existing concurrent-create test as part of
-  T1-T6; track its production race separately if it reproduces.
+  T1-T7; track its production race separately if it reproduces.
 - Do not add negative caching, collection caching, warming, refresh-ahead, HTTP cache semantics,
   distributed locks, Redis persistence/high availability, or a PostgreSQL migration.
 - Do not expand T5 to reimplement the Inventory smoke fixture owned by Price Creation T2; satisfy

@@ -16,6 +16,9 @@ import org.springframework.data.redis.cache.RedisCache;
 import org.springframework.data.redis.cache.RedisCacheConfiguration;
 import org.springframework.data.redis.cache.RedisCacheManager;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
+import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.serializer.JacksonJsonRedisSerializer;
+import org.springframework.data.redis.serializer.StringRedisSerializer;
 
 import com.rentflow.model.PricingCacheEntry;
 import com.rentflow.service.PricingCacheService;
@@ -31,6 +34,7 @@ import static org.mockito.Mockito.verifyNoInteractions;
 class RedisCacheConfigTest {
 
     @Test
+    @SuppressWarnings("unchecked")
     void createsTheTypedExpiringCacheWithoutConnectingToRedis() {
         RedisConnectionFactory connectionFactory = mock(RedisConnectionFactory.class);
 
@@ -66,6 +70,15 @@ class RedisCacheConfigTest {
                     .doesNotContain(PricingCacheEntry.class.getName());
             assertThat(configuration.getValueSerializationPair().read(encodedValue.duplicate()))
                     .isInstanceOf(PricingCacheEntry.class)
+                    .isEqualTo(entry);
+            JacksonJsonRedisSerializer<PricingCacheEntry> valueSerializer =
+                    context.getBean("pricingCacheValueSerializer", JacksonJsonRedisSerializer.class);
+            RedisTemplate<String, PricingCacheEntry> redisTemplate =
+                    context.getBean("pricingCacheRedisTemplate", RedisTemplate.class);
+            assertThat(redisTemplate.getConnectionFactory()).isSameAs(connectionFactory);
+            assertThat(redisTemplate.getKeySerializer()).isSameAs(StringRedisSerializer.UTF_8);
+            assertThat(redisTemplate.getValueSerializer()).isSameAs(valueSerializer);
+            assertThat(valueSerializer.deserialize(valueSerializer.serialize(entry)))
                     .isEqualTo(entry);
             assertThat(context.getBean(PricingCacheErrorHandler.class))
                     .isSameAs(context.getBean(RedisCacheConfig.class).errorHandler());
