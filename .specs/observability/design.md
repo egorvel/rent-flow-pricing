@@ -1,6 +1,6 @@
 # Pricing observability design
 
-Status: Implementation in progress; this document defines the accepted implementation contract.
+Status: Implemented and verified on 2026-10-11; this document defines the accepted implementation contract.
 
 ## 1. Scope, ownership and compatibility
 
@@ -387,6 +387,13 @@ responses; it is not a service fixture added to Compose. Common tests the real t
 Every implementation increment runs `mvn -B -ntp clean verify` with Java 25 and Docker, without
 skips, and confirms BUILD SUCCESS. Final service acceptance also runs
 `./scripts/container-smoke-test.sh`. Common acceptance remains a separate repository request.
+
+Final Pricing acceptance on 2026-10-11: Java 25 `mvn -B -ntp clean verify` reported BUILD SUCCESS
+with 94 unit/architecture tests and 101 integration tests, zero failures/errors/skips.
+`./scripts/container-smoke-test.sh` reported Container smoke verification passed, including private
+management and public Actuator isolation. The cache regression context explicitly uses zero trace
+sampling. Enabled-export coverage observed real bounded-queue drops and refused delivery while
+business work and readiness succeeded. These results cover Pricing; Common's handoff is pending.
 
 ## 9. Requirements traceability
 

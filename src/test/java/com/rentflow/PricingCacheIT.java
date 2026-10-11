@@ -11,6 +11,7 @@ import jakarta.persistence.EntityManager;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.micrometer.tracing.test.autoconfigure.AutoConfigureTracing;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.cache.CacheManager;
@@ -39,6 +40,7 @@ import com.rentflow.service.PricingCacheService;
 import com.rentflow.support.PostgresIntegrationTest;
 
 import io.micrometer.core.instrument.MeterRegistry;
+import io.opentelemetry.sdk.trace.SdkTracerProvider;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
@@ -62,7 +64,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
-@SpringBootTest
+@SpringBootTest(properties = "management.tracing.sampling.probability=0")
+@AutoConfigureTracing
 @AutoConfigureMockMvc
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 class PricingCacheIT extends PostgresIntegrationTest {
@@ -87,6 +90,9 @@ class PricingCacheIT extends PostgresIntegrationTest {
 
     @Autowired
     private MeterRegistry meterRegistry;
+
+    @Autowired
+    private SdkTracerProvider tracerProvider;
 
     @Autowired
     private EntityManager entityManager;
@@ -114,6 +120,19 @@ class PricingCacheIT extends PostgresIntegrationTest {
         redisCache().clearStatistics();
         reset(repository);
         when(inventoryGateway.exists(anyString())).thenReturn(true);
+    }
+
+    @Test
+    void runsCacheAccountingWithZeroTraceSampling() {
+        io.opentelemetry.api.trace.Span span = tracerProvider
+                .get("cache-accounting-test")
+                .spanBuilder("zero-sampling")
+                .startSpan();
+        try {
+            assertThat(span.getSpanContext().isSampled()).isFalse();
+        } finally {
+            span.end();
+        }
     }
 
     @Test

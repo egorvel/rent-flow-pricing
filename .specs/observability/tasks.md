@@ -1,6 +1,6 @@
 # Pricing observability tasks
 
-Status: Implementation in progress; T1–T4 verified, T5–T7 pending.
+Status: Complete; T1–T7 implemented and verified on 2026-10-11.
 
 ## 1. Execution boundary and ordering
 
@@ -235,6 +235,13 @@ isolation assertions. Mark implementation tasks complete only after their DoD is
   `./scripts/container-smoke-test.sh` reports Container smoke verification passed.
 
 ## 3. Coverage index
+
+All seven increments passed Java 25 `mvn -B -ntp clean verify` before their implementation commit.
+Final acceptance passed 94 unit/architecture tests and 101 integration tests with no failures,
+errors or skips. The basic container smoke test reported Container smoke verification passed;
+its isolated stack was cleaned up. T7 also runs the cache accounting regression suite with an
+explicit zero-sampling tracer. Common configuration, dashboards, alerts and real-service workflow
+verification remain the documented follow-up, outside Pricing acceptance.
 
 | Acceptance criteria | Task DoD that detects regression |
 | --- | --- |

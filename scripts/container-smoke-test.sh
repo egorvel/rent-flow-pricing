@@ -51,5 +51,19 @@ assert_http_status 200 "${BASE_URL}/readyz"
 assert_http_status 200 "${BASE_URL}/api/v1/pricing"
 assert_http_status 404 "${BASE_URL}/api/v1/pricing/SMOKE-MISSING"
 assert_http_status 404 "${BASE_URL}/api/v1/pricing/SMOKE-MISSING/cached"
+assert_http_status 404 "${BASE_URL}/actuator/prometheus"
+assert_http_status 404 "${BASE_URL}/actuator/health"
+
+pricing_container="$(compose ps --quiet pricing)"
+management_binding="$(docker inspect \
+    --format '{{with index .HostConfig.PortBindings "8086/tcp"}}{{json .}}{{end}}' \
+    "$pricing_container")"
+if [[ -n "$management_binding" ]]; then
+    printf 'ERROR: management port 8086 is published to the host\n' >&2
+    exit 1
+fi
+compose exec --no-TTY pricing curl \
+    --fail --silent --show-error --max-time 5 \
+    http://127.0.0.1:8086/actuator/prometheus >/dev/null
 
 printf 'Container smoke verification passed\n'

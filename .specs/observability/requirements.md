@@ -1,6 +1,6 @@
 # Pricing observability requirements
 
-Status: Implementation in progress, authorized by the subsequent "Let's implement it now" request.
+Status: Implemented and verified on 2026-10-11; Common integration remains a separate handoff.
 
 ## Context
 
@@ -8,10 +8,10 @@ Pricing owns application instrumentation; Common owns telemetry collection, stor
 alerts and cross-service verification. This feature applies the shared
 [observability plan](../../../OBSERVABILITY_PLAN.md) and Inventory's implemented baseline to Pricing.
 
-Actuator already supplies health and Micrometer. Single-cache statistics, batch entry/error/size
-meters and Inventory Resilience4j meters exist, but Prometheus export, distributed tracing and ECS
-logging are not configured. Batch misses combine ordinary misses and cache failures; suppressed
-cache errors are logged only at DEBUG without exception details. Operators cannot directly measure
+Before this feature, Actuator supplied health and Micrometer. Single-cache statistics, batch entry/error/size
+meters and Inventory Resilience4j meters existed, but Prometheus export, distributed tracing and ECS
+logging were not configured. Batch misses combined ordinary misses and cache failures; suppressed
+cache errors were logged only at DEBUG without exception details. Operators could not directly measure
 the database work caused by these paths or the full latency of an Inventory retry sequence.
 
 ## User stories with acceptance criteria
