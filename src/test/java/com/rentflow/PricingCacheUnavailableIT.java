@@ -103,6 +103,9 @@ class PricingCacheUnavailableIT extends PostgresIntegrationTest {
         double getErrorsBefore = cacheErrors("get");
         double putErrorsBefore = cacheErrors("put");
         double batchReadErrorsBefore = batchErrors("read");
+        double singleLoadsBefore = databaseCount("loads", "single");
+        double batchLoadsBefore = databaseCount("loads", "batch");
+        double batchEntriesBefore = databaseCount("entries", "batch");
         mockMvc.perform(get("/api/v1/pricing/OUTAGE-CACHED/cached"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.price").value(125.00))
@@ -125,8 +128,12 @@ class PricingCacheUnavailableIT extends PostgresIntegrationTest {
         assertThat(cacheErrors("get")).isGreaterThanOrEqualTo(getErrorsBefore + 4.0);
         assertThat(cacheErrors("put")).isGreaterThanOrEqualTo(putErrorsBefore + 1.0);
         assertThat(batchErrors("read")).isEqualTo(batchReadErrorsBefore + 2.0);
+        assertThat(databaseCount("loads", "single")).isEqualTo(singleLoadsBefore + 2);
+        assertThat(databaseCount("loads", "batch")).isEqualTo(batchLoadsBefore + 2);
+        assertThat(databaseCount("entries", "batch")).isEqualTo(batchEntriesBefore + 5);
 
         double evictErrorsBefore = cacheErrors("evict");
+        double loadsBeforeWrites = databaseCount("loads", "single") + databaseCount("loads", "batch");
         mockMvc.perform(post("/api/v1/pricing")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(request("OUTAGE-CREATE", "200.00")))
@@ -152,6 +159,14 @@ class PricingCacheUnavailableIT extends PostgresIntegrationTest {
                 .isEqualByComparingTo("250.00");
         assertThat(repository.findById("OUTAGE-DELETE")).isEmpty();
         assertThat(cacheErrors("evict")).isGreaterThanOrEqualTo(evictErrorsBefore + 3.0);
+        assertThat(databaseCount("loads", "single") + databaseCount("loads", "batch"))
+                .isEqualTo(loadsBeforeWrites + 1);
+    }
+
+    private double databaseCount(String unit, String mode) {
+        return meterRegistry
+                .counter("pricing.cache.database." + unit, "mode", mode, "reason", "read_error")
+                .count();
     }
 
     private double cacheErrors(String operation) {

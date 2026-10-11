@@ -46,7 +46,8 @@ class PricingServiceTest {
         when(repository.existsById("DRILL-001")).thenReturn(false);
         when(inventoryGateway.exists("DRILL-001")).thenReturn(true);
         when(repository.saveAndFlush(any(Pricing.class))).thenAnswer(invocation -> invocation.getArgument(0));
-        PricingService service = new PricingService(repository, inventoryGateway, cacheService);
+        PricingService service = new PricingService(
+                repository, inventoryGateway, cacheService, io.micrometer.observation.ObservationRegistry.NOOP);
 
         Pricing created = service.create(pricing("DRILL-001", "125.50"));
 
@@ -59,7 +60,8 @@ class PricingServiceTest {
     @Test
     void rejectsAnExistingSerialBeforeSaving() {
         when(repository.existsById("DRILL-001")).thenReturn(true);
-        PricingService service = new PricingService(repository, inventoryGateway, cacheService);
+        PricingService service = new PricingService(
+                repository, inventoryGateway, cacheService, io.micrometer.observation.ObservationRegistry.NOOP);
 
         assertThatThrownBy(() -> service.create(pricing("DRILL-001", "125.50")))
                 .isInstanceOf(PricingAlreadyExistsException.class);
@@ -72,7 +74,8 @@ class PricingServiceTest {
     void rejectsASerialThatDoesNotExistInInventoryWithoutSaving() {
         when(repository.existsById("MISSING")).thenReturn(false);
         when(inventoryGateway.exists("MISSING")).thenReturn(false);
-        PricingService service = new PricingService(repository, inventoryGateway, cacheService);
+        PricingService service = new PricingService(
+                repository, inventoryGateway, cacheService, io.micrometer.observation.ObservationRegistry.NOOP);
 
         assertThatThrownBy(() -> service.create(pricing("MISSING", "125.50")))
                 .isInstanceOf(InventoryItemNotFoundException.class);
@@ -86,7 +89,8 @@ class PricingServiceTest {
                 "DRILL-001", new IllegalStateException("inventory unavailable"));
         when(repository.existsById("DRILL-001")).thenReturn(false);
         when(inventoryGateway.exists("DRILL-001")).thenThrow(failure);
-        PricingService service = new PricingService(repository, inventoryGateway, cacheService);
+        PricingService service = new PricingService(
+                repository, inventoryGateway, cacheService, io.micrometer.observation.ObservationRegistry.NOOP);
 
         assertThatThrownBy(() -> service.create(pricing("DRILL-001", "125.50"))).isSameAs(failure);
 
@@ -98,7 +102,8 @@ class PricingServiceTest {
         when(repository.existsById("DRILL-001")).thenReturn(false);
         when(inventoryGateway.exists("DRILL-001")).thenReturn(true);
         when(repository.saveAndFlush(any(Pricing.class))).thenThrow(new DataIntegrityViolationException("duplicate"));
-        PricingService service = new PricingService(repository, inventoryGateway, cacheService);
+        PricingService service = new PricingService(
+                repository, inventoryGateway, cacheService, io.micrometer.observation.ObservationRegistry.NOOP);
 
         assertThatThrownBy(() -> service.create(pricing("DRILL-001", "125.50")))
                 .isInstanceOf(PricingAlreadyExistsException.class);
@@ -108,7 +113,8 @@ class PricingServiceTest {
     void returnsExistingPricing() {
         Pricing pricing = pricing("DRILL-001", "125.50");
         when(repository.findById("DRILL-001")).thenReturn(Optional.of(pricing));
-        PricingService service = new PricingService(repository, inventoryGateway, cacheService);
+        PricingService service = new PricingService(
+                repository, inventoryGateway, cacheService, io.micrometer.observation.ObservationRegistry.NOOP);
 
         assertThat(service.get("DRILL-001")).isSameAs(pricing);
         verify(repository).findById("DRILL-001");
@@ -119,7 +125,8 @@ class PricingServiceTest {
     void delegatesCachedRetrievalOnlyToTheSeparateCacheService() {
         PricingCacheEntry entry = PricingCacheEntry.from(pricing("DRILL-001", "125.50"));
         when(cacheService.get("DRILL-001")).thenReturn(entry);
-        PricingService service = new PricingService(repository, inventoryGateway, cacheService);
+        PricingService service = new PricingService(
+                repository, inventoryGateway, cacheService, io.micrometer.observation.ObservationRegistry.NOOP);
 
         PricingCacheEntry result = service.getCached("DRILL-001");
 
@@ -134,7 +141,8 @@ class PricingServiceTest {
         PricingCacheEntry drill = PricingCacheEntry.from(pricing("DRILL-001", "125.50"));
         List<String> serialNumbers = List.of("SAW-002", "DRILL-001");
         when(cacheService.getBatch(serialNumbers)).thenReturn(List.of(drill, saw));
-        PricingService service = new PricingService(repository, inventoryGateway, cacheService);
+        PricingService service = new PricingService(
+                repository, inventoryGateway, cacheService, io.micrometer.observation.ObservationRegistry.NOOP);
 
         List<PricingCacheEntry> entries = service.getCachedBatch(serialNumbers);
 
@@ -148,7 +156,8 @@ class PricingServiceTest {
     void propagatesMissingPricingFromTheBulkCacheService() {
         List<String> serialNumbers = List.of("SAW-002", "MISSING", "LATER");
         when(cacheService.getBatch(serialNumbers)).thenThrow(new PricingNotFoundException("MISSING"));
-        PricingService service = new PricingService(repository, inventoryGateway, cacheService);
+        PricingService service = new PricingService(
+                repository, inventoryGateway, cacheService, io.micrometer.observation.ObservationRegistry.NOOP);
 
         assertThatThrownBy(() -> service.getCachedBatch(serialNumbers))
                 .isInstanceOf(PricingNotFoundException.class)
@@ -161,7 +170,8 @@ class PricingServiceTest {
     @Test
     void rejectsMissingPricingWithoutMutation() {
         when(repository.findById("MISSING")).thenReturn(Optional.empty());
-        PricingService service = new PricingService(repository, inventoryGateway, cacheService);
+        PricingService service = new PricingService(
+                repository, inventoryGateway, cacheService, io.micrometer.observation.ObservationRegistry.NOOP);
 
         assertThatThrownBy(() -> service.get("MISSING")).isInstanceOf(PricingNotFoundException.class);
 
@@ -172,7 +182,8 @@ class PricingServiceTest {
     @Test
     void buildsDeterministicNonSerialSorting() {
         when(repository.findAll(any(Pageable.class))).thenReturn(Page.empty());
-        PricingService service = new PricingService(repository, inventoryGateway, cacheService);
+        PricingService service = new PricingService(
+                repository, inventoryGateway, cacheService, io.micrometer.observation.ObservationRegistry.NOOP);
 
         service.list(2, 15, PricingSortField.PRICE, Sort.Direction.DESC);
 
@@ -191,7 +202,8 @@ class PricingServiceTest {
     @Test
     void doesNotAddARedundantTieBreakerToUniqueSerialSorting() {
         when(repository.findAll(any(Pageable.class))).thenReturn(Page.empty());
-        PricingService service = new PricingService(repository, inventoryGateway, cacheService);
+        PricingService service = new PricingService(
+                repository, inventoryGateway, cacheService, io.micrometer.observation.ObservationRegistry.NOOP);
 
         service.list(0, 20, PricingSortField.SERIAL_NUMBER, Sort.Direction.DESC);
 
@@ -206,7 +218,8 @@ class PricingServiceTest {
     void replacesOnlyMutableDetailsOnExistingPricing() {
         Pricing pricing = pricing("DRILL-001", "125.50");
         when(repository.findById("DRILL-001")).thenReturn(Optional.of(pricing));
-        PricingService service = new PricingService(repository, inventoryGateway, cacheService);
+        PricingService service = new PricingService(
+                repository, inventoryGateway, cacheService, io.micrometer.observation.ObservationRegistry.NOOP);
         Pricing replacement = new Pricing(
                 "DRILL-001",
                 new BigDecimal("150.00"),
@@ -231,7 +244,8 @@ class PricingServiceTest {
     @Test
     void rejectsReplacementOfMissingPricingWithoutMutation() {
         when(repository.findById("MISSING")).thenReturn(Optional.empty());
-        PricingService service = new PricingService(repository, inventoryGateway, cacheService);
+        PricingService service = new PricingService(
+                repository, inventoryGateway, cacheService, io.micrometer.observation.ObservationRegistry.NOOP);
 
         assertThatThrownBy(() -> service.replace(pricing("MISSING", "125.50")))
                 .isInstanceOf(PricingNotFoundException.class);
@@ -244,7 +258,8 @@ class PricingServiceTest {
     void loadsExistingPricingBeforeDeletingIt() {
         Pricing pricing = pricing("DRILL-001", "125.50");
         when(repository.findById("DRILL-001")).thenReturn(Optional.of(pricing));
-        PricingService service = new PricingService(repository, inventoryGateway, cacheService);
+        PricingService service = new PricingService(
+                repository, inventoryGateway, cacheService, io.micrometer.observation.ObservationRegistry.NOOP);
 
         service.delete("DRILL-001");
 
@@ -260,7 +275,8 @@ class PricingServiceTest {
         DataIntegrityViolationException failure = new DataIntegrityViolationException("delete failed");
         when(repository.findById("DRILL-001")).thenReturn(Optional.of(pricing));
         doThrow(failure).when(repository).delete(pricing);
-        PricingService service = new PricingService(repository, inventoryGateway, cacheService);
+        PricingService service = new PricingService(
+                repository, inventoryGateway, cacheService, io.micrometer.observation.ObservationRegistry.NOOP);
 
         assertThatThrownBy(() -> service.delete("DRILL-001")).isSameAs(failure);
     }
@@ -268,7 +284,8 @@ class PricingServiceTest {
     @Test
     void rejectsDeletionOfMissingPricingWithoutMutation() {
         when(repository.findById("MISSING")).thenReturn(Optional.empty());
-        PricingService service = new PricingService(repository, inventoryGateway, cacheService);
+        PricingService service = new PricingService(
+                repository, inventoryGateway, cacheService, io.micrometer.observation.ObservationRegistry.NOOP);
 
         assertThatThrownBy(() -> service.delete("MISSING")).isInstanceOf(PricingNotFoundException.class);
 

@@ -15,18 +15,25 @@ import com.rentflow.model.Pricing;
 import com.rentflow.model.PricingCacheEntry;
 import com.rentflow.repository.PricingRepository;
 
+import io.micrometer.observation.ObservationRegistry;
+
 @Service
 public class PricingService {
 
     private final PricingRepository repository;
     private final InventoryGateway inventoryGateway;
     private final PricingCacheService cacheService;
+    private final ObservationRegistry observationRegistry;
 
     public PricingService(
-            PricingRepository repository, InventoryGateway inventoryGateway, PricingCacheService cacheService) {
+            PricingRepository repository,
+            InventoryGateway inventoryGateway,
+            PricingCacheService cacheService,
+            ObservationRegistry observationRegistry) {
         this.repository = repository;
         this.inventoryGateway = inventoryGateway;
         this.cacheService = cacheService;
+        this.observationRegistry = observationRegistry;
     }
 
     @CacheEvict(cacheNames = PricingCacheService.CACHE_NAME, key = "#pricing.serialNumber")
@@ -50,11 +57,12 @@ public class PricingService {
     }
 
     public PricingCacheEntry getCached(String serialNumber) {
-        return cacheService.get(serialNumber);
+        return PricingCacheLookupContext.observe(observationRegistry, "single", () -> cacheService.get(serialNumber));
     }
 
     public List<PricingCacheEntry> getCachedBatch(List<String> serialNumbers) {
-        return cacheService.getBatch(serialNumbers);
+        return PricingCacheLookupContext.observe(
+                observationRegistry, "batch", () -> cacheService.getBatch(serialNumbers));
     }
 
     @Transactional(readOnly = true)

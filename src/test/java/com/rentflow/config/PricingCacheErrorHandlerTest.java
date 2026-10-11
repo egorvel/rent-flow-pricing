@@ -20,7 +20,8 @@ class PricingCacheErrorHandlerTest {
     @Test
     void suppressesEveryCacheOperationAndCountsOnlyBoundedOperationTags() {
         SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
-        PricingCacheErrorHandler handler = new PricingCacheErrorHandler(meterRegistry);
+        PricingCacheErrorHandler handler =
+                new PricingCacheErrorHandler(meterRegistry, io.micrometer.observation.ObservationRegistry.NOOP);
         Cache cache = mock(Cache.class);
         RuntimeException failure = new IllegalStateException("redis://user:secret@cache/valuable-key");
 
@@ -61,7 +62,8 @@ class PricingCacheErrorHandlerTest {
     @Test
     void logsEachFailureOnlyAtDebugWithoutSensitiveDetails() {
         SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
-        PricingCacheErrorHandler handler = new PricingCacheErrorHandler(meterRegistry);
+        PricingCacheErrorHandler handler =
+                new PricingCacheErrorHandler(meterRegistry, io.micrometer.observation.ObservationRegistry.NOOP);
         Cache cache = mock(Cache.class);
         ch.qos.logback.classic.Logger logger =
                 (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(PricingCacheErrorHandler.class);

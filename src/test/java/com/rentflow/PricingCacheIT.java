@@ -495,6 +495,70 @@ class PricingCacheIT extends PostgresIntegrationTest {
                 .count();
     }
 
+    @Test
+    void countsDatabaseAttemptsByReasonIncludingMixedBatchesAndFailures() throws Exception {
+        save("ACCOUNT-HIT", "100.00");
+        save("ACCOUNT-MISS", "125.00");
+        save("ACCOUNT-DECODE", "150.00");
+        double missBefore = databaseCount("loads", "single", "miss");
+        warm("ACCOUNT-HIT");
+        warm("ACCOUNT-HIT");
+        assertThat(databaseCount("loads", "single", "miss")).isEqualTo(missBefore + 1);
+        String wrongJson = redisTemplate.opsForValue().get(cacheKey("ACCOUNT-HIT"));
+        redisTemplate.opsForValue().set(cacheKey("ACCOUNT-DECODE"), wrongJson, TEST_TTL);
+        double mixedBefore = databaseCount("loads", "batch", "mixed");
+        double missEntriesBefore = databaseCount("entries", "batch", "miss");
+        double decodeEntriesBefore = databaseCount("entries", "batch", "decode_error");
+        mockMvc.perform(post("/api/v1/pricing/batch/cached")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("[\"ACCOUNT-HIT\",\"ACCOUNT-MISS\",\"ACCOUNT-DECODE\",\"ACCOUNT-MISS\"]"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(3));
+        assertThat(databaseCount("loads", "batch", "mixed")).isEqualTo(mixedBefore + 1);
+        assertThat(databaseCount("entries", "batch", "miss")).isEqualTo(missEntriesBefore + 1);
+        assertThat(databaseCount("entries", "batch", "decode_error")).isEqualTo(decodeEntriesBefore + 1);
+        redisTemplate.opsForValue().set(cacheKey("ACCOUNT-DECODE"), "invalid-json", TEST_TTL);
+        double decodeBefore = databaseCount("loads", "single", "decode_error");
+        warm("ACCOUNT-DECODE");
+        assertThat(databaseCount("loads", "single", "decode_error")).isEqualTo(decodeBefore + 1);
+        double batchDecodeBefore = databaseCount("loads", "batch", "decode_error");
+        double batchDecodeEntriesBefore = databaseCount("entries", "batch", "decode_error");
+        redisTemplate.opsForValue().set(cacheKey("ACCOUNT-DECODE"), "invalid-json", TEST_TTL);
+        mockMvc.perform(post("/api/v1/pricing/batch/cached")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("[\"ACCOUNT-HIT\",\"ACCOUNT-DECODE\"]"))
+                .andExpect(status().isOk());
+        assertThat(databaseCount("loads", "batch", "decode_error")).isEqualTo(batchDecodeBefore + 1);
+        assertThat(databaseCount("entries", "batch", "decode_error")).isEqualTo(batchDecodeEntriesBefore + 2);
+        double absentBefore = databaseCount("loads", "single", "miss");
+        mockMvc.perform(get("/api/v1/pricing/ACCOUNT-MISSING/cached")).andExpect(status().isNotFound());
+        org.mockito.Mockito.doThrow(new IllegalStateException("database unavailable"))
+                .when(repository)
+                .findById("ACCOUNT-FAILURE");
+        mockMvc.perform(get("/api/v1/pricing/ACCOUNT-FAILURE/cached")).andExpect(status().isInternalServerError());
+        assertThat(databaseCount("loads", "single", "miss")).isEqualTo(absentBefore + 2);
+        assertThat(meterRegistry
+                        .get("pricing.cache.lookup")
+                        .tag("mode", "batch")
+                        .tag("outcome", "degraded")
+                        .timer()
+                        .count())
+                .isPositive();
+        assertThat(meterRegistry
+                        .get("pricing.cache.lookup")
+                        .tag("mode", "single")
+                        .tag("outcome", "error")
+                        .timer()
+                        .count())
+                .isPositive();
+    }
+
+    private double databaseCount(String unit, String mode, String reason) {
+        return meterRegistry
+                .counter("pricing.cache.database." + unit, "mode", mode, "reason", reason)
+                .count();
+    }
+
     private double batchErrors(String operation) {
         return meterRegistry
                 .get("pricing.cache.batch.errors")

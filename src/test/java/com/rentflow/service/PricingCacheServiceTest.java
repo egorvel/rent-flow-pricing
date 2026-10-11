@@ -268,7 +268,13 @@ class PricingCacheServiceTest {
     }
 
     private PricingCacheService service() {
-        return new PricingCacheService(repository, cacheManager, redisTemplate, errorHandler, meterRegistry);
+        return new PricingCacheService(
+                repository,
+                cacheManager,
+                redisTemplate,
+                errorHandler,
+                meterRegistry,
+                io.micrometer.observation.ObservationRegistry.NOOP);
     }
 
     private RedisCacheConfiguration configureCache() {

@@ -191,6 +191,9 @@ class RedisCacheConfigTest {
                 .withBean(RedisConnectionFactory.class, () -> connectionFactory)
                 .withBean(ObjectMapper.class, ObjectMapper::new)
                 .withBean(MeterRegistry.class, SimpleMeterRegistry::new)
+                .withBean(
+                        io.micrometer.observation.ObservationRegistry.class,
+                        () -> io.micrometer.observation.ObservationRegistry.NOOP)
                 .withBean(PricingCacheErrorHandler.class)
                 .withUserConfiguration(RedisCacheConfig.class);
     }

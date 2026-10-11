@@ -9,8 +9,11 @@ import org.springframework.cache.Cache;
 import org.springframework.cache.interceptor.CacheErrorHandler;
 import org.springframework.stereotype.Component;
 
+import com.rentflow.service.PricingCacheLookupContext;
+
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.observation.ObservationRegistry;
 
 @Component
 public class PricingCacheErrorHandler implements CacheErrorHandler {
@@ -18,8 +21,10 @@ public class PricingCacheErrorHandler implements CacheErrorHandler {
     private static final Logger LOGGER = LoggerFactory.getLogger(PricingCacheErrorHandler.class);
 
     private final Map<Operation, Counter> errorCounters;
+    private final ObservationRegistry observationRegistry;
 
-    public PricingCacheErrorHandler(MeterRegistry meterRegistry) {
+    public PricingCacheErrorHandler(MeterRegistry meterRegistry, ObservationRegistry observationRegistry) {
+        this.observationRegistry = observationRegistry;
         errorCounters = new EnumMap<>(Operation.class);
         for (Operation operation : Operation.values()) {
             Counter counter = Counter.builder("pricing.cache.errors")
@@ -52,6 +57,7 @@ public class PricingCacheErrorHandler implements CacheErrorHandler {
 
     private void record(Operation operation, RuntimeException exception) {
         errorCounters.get(operation).increment();
+        PricingCacheLookupContext.failed(observationRegistry, operation.tag, exception);
         LOGGER.debug(
                 "Redis cache {} operation failed; continuing without cache ({})",
                 operation.tag,
