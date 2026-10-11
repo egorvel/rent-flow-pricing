@@ -1,4 +1,6 @@
 spring:
+  main:
+    banner-mode: "off"
   application:
     name: rent-flow-pricing
   cache:
@@ -45,10 +47,65 @@ springdoc:
   paths-to-match: /api/v1/**
 
 management:
+  server:
+    port: ${MANAGEMENT_SERVER_PORT:8086}
+    address: ${MANAGEMENT_SERVER_ADDRESS:127.0.0.1}
+  metrics:
+    tags:
+      service: ${spring.application.name}
+      environment: ${OBSERVABILITY_ENVIRONMENT:local}
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
+        http.client.requests: true
+        pricing.cache.lookup: true
+        pricing.inventory.lookup: true
+      minimum-expected-value:
+        http.server.requests: 1ms
+        http.client.requests: 1ms
+        pricing.cache.lookup: 1ms
+        pricing.inventory.lookup: 1ms
+      maximum-expected-value:
+        http.server.requests: 10s
+        http.client.requests: 10s
+        pricing.cache.lookup: 10s
+        pricing.inventory.lookup: 10s
+  tracing:
+    propagation:
+      type: w3c
+    baggage:
+      enabled: false
+    sampling:
+      probability: ${TRACING_SAMPLING_PROBABILITY:1.0}
+    export:
+      otlp:
+        enabled: ${TRACING_EXPORT_ENABLED:false}
+  logging:
+    export:
+      otlp:
+        enabled: false
+  otlp:
+    metrics:
+      export:
+        enabled: false
+  opentelemetry:
+    resource-attributes:
+      service.name: ${spring.application.name}
+      deployment.environment.name: ${OBSERVABILITY_ENVIRONMENT:local}
+      service.instance.id: ${OBSERVABILITY_INSTANCE:${HOSTNAME:standalone}}
+    tracing:
+      export:
+        max-queue-size: 2048
+        max-batch-size: 512
+        otlp:
+          transport: http
+          endpoint: ${TRACING_OTLP_ENDPOINT:http://localhost:4318/v1/traces}
+          connect-timeout: 2s
+          timeout: 2s
   endpoints:
     web:
       exposure:
-        include: health
+        include: health,prometheus
   endpoint:
     health:
       probes:
@@ -60,6 +117,19 @@ management:
         readiness:
           include: readinessState,db
       show-details: never
+
+logging:
+  structured:
+    format:
+      console: ecs
+    ecs:
+      service:
+        environment: ${OBSERVABILITY_ENVIRONMENT:local}
+        node-name: ${OBSERVABILITY_INSTANCE:${HOSTNAME:standalone}}
+    json:
+      stacktrace:
+        max-length: 16384
+        max-throwable-depth: 64
 
 resilience4j:
   circuitbreaker:

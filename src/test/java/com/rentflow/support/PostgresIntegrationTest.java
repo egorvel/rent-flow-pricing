@@ -21,6 +21,7 @@ public abstract class PostgresIntegrationTest {
 
     @DynamicPropertySource
     static void registerDatasourceProperties(DynamicPropertyRegistry registry) {
+        registry.add("management.server.port", () -> 0);
         registry.add("spring.datasource.url", POSTGRES::getJdbcUrl);
         registry.add("spring.datasource.username", () -> PRICING_USERNAME);
         registry.add("spring.datasource.password", () -> PRICING_PASSWORD);
