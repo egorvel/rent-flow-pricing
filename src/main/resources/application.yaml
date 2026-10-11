@@ -131,6 +131,19 @@ logging:
         max-length: 16384
         max-throwable-depth: 64
 
+jdbc:
+  includes: connection,query
+  hikari:
+    enabled: false
+  resultset-operations:
+    enabled: false
+  datasource-proxy:
+    include-parameter-values: false
+    query:
+      enable-logging: false
+    slow-query:
+      enable-logging: false
+
 resilience4j:
   circuitbreaker:
     instances:
