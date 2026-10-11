@@ -24,6 +24,9 @@ import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import io.github.resilience4j.retry.RetryConfig;
 import io.github.resilience4j.retry.RetryRegistry;
+import io.micrometer.core.instrument.observation.DefaultMeterObservationHandler;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import io.micrometer.observation.ObservationRegistry;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -39,9 +42,12 @@ class RestInventoryServiceTest {
 
     private CircuitBreaker circuitBreaker;
     private RestInventoryService service;
+    private final SimpleMeterRegistry metrics = new SimpleMeterRegistry();
+    private final ObservationRegistry observations = ObservationRegistry.create();
 
     @BeforeEach
     void configureResilience() {
+        observations.observationConfig().observationHandler(new DefaultMeterObservationHandler(metrics));
         CircuitBreakerConfig circuitBreakerConfig = CircuitBreakerConfig.custom()
                 .slidingWindowSize(20)
                 .minimumNumberOfCalls(10)
@@ -56,7 +62,7 @@ class RestInventoryServiceTest {
                 .build();
         RetryRegistry retryRegistry = RetryRegistry.of(retryConfig);
         circuitBreaker = circuitBreakerRegistry.circuitBreaker("inventory");
-        service = new RestInventoryService(inventoryClient, circuitBreakerRegistry, retryRegistry);
+        service = new RestInventoryService(inventoryClient, circuitBreakerRegistry, retryRegistry, observations);
     }
 
     @Test
@@ -157,6 +163,22 @@ class RestInventoryServiceTest {
 
         verify(inventoryClient).getInventoryItem("DRILL-001");
         assertThat(circuitBreaker.getMetrics().getNumberOfBufferedCalls()).isZero();
+    }
+
+    @Test
+    void observesUnexpectedFailuresWithoutChangingTheirPropagationAndClosesScope() {
+        IllegalStateException failure = new IllegalStateException("unexpected adapter failure");
+        when(inventoryClient.getInventoryItem("DRILL-001")).thenThrow(failure);
+
+        assertThatThrownBy(() -> service.exists("DRILL-001")).isSameAs(failure);
+
+        assertThat(metrics.get("pricing.inventory.lookup")
+                        .tag("outcome", "error")
+                        .timer()
+                        .count())
+                .isOne();
+        assertThat(observations.getCurrentObservation()).isNull();
+        verify(inventoryClient).getInventoryItem("DRILL-001");
     }
 
     @Test
