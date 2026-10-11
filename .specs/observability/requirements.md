@@ -1,6 +1,6 @@
 # Pricing observability requirements
 
-Status: Proposed; implementation requires a separate request.
+Status: Implementation in progress, authorized by the subsequent "Let's implement it now" request.
 
 ## Context
 
@@ -55,7 +55,7 @@ As an implementer, I need useful internal diagnostics and a concrete handoff to 
 
 ## Out of scope
 
-Application implementation during this specification phase; Common configuration changes or
+Common configuration changes or
 dashboard/alert provisioning; production authentication/TLS and SLO selection; database migrations;
 cache correctness fixes, durable eviction, stampede control or retry/circuit policy changes;
 Kafka instrumentation; calculated rental-price features; an OpenTelemetry agent or parallel SDK;
@@ -64,7 +64,8 @@ creation workflows in Pricing's Compose smoke test.
 
 ## Resolved questions
 
-1. Create a full requirements/design/tasks spec now; application implementation is a later request.
+1. Create a full requirements/design/tasks spec first; the subsequent implementation request
+   authorizes Pricing implementation.
    See design.md §1 and tasks.md §1.
 2. Include Redis command spans alongside HTTP and JDBC spans, with command arguments and values
    excluded through Boot/Lettuce defaults. See design.md §3.

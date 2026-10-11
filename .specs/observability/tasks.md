@@ -1,11 +1,11 @@
 # Pricing observability tasks
 
-Status: Proposed; no implementation tasks have been executed.
+Status: Implementation in progress; T1–T4 verified, T5–T7 pending.
 
 ## 1. Execution boundary and ordering
 
-This request authorizes the spec and its evaluation report. Application implementation needs a
-separate Pricing request. Common changes need their own request; its handoff is documented in T7.
+The subsequent "Let's implement it now" request authorizes Pricing implementation.
+Common changes need their own request; its handoff is documented in T7.
 Each task below is one safe commit, including its focused tests. Run Java 25
 `mvn -B -ntp clean verify` for every increment and confirm BUILD SUCCESS without skipped checks.
 If Spotless fails, apply formatting and rerun verification; do not weaken assertions or error handling.
@@ -144,6 +144,11 @@ Explicitly attach unexpected handled failures to the current server observation 
   handling preserves its generic public response and emits correlated ERROR diagnostics with an
   errored server observation.
 - All tests pass `mvn -B -ntp clean verify` with BUILD SUCCESS.
+
+Implementation regression discovered during T4: assigned-ID JPA merge could turn a late concurrent
+create into an update. Preserve AC1.2 with the new-entity detection in design.md §1 and a deterministic
+test committing the winner during the loser's Inventory check, alongside the original two-request
+201/409 assertion. Neither the winning price nor the transaction boundaries may change.
 
 ### T5 — Observe the full Inventory lookup and resilience events
 

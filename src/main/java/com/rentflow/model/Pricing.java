@@ -5,11 +5,19 @@ import java.util.Objects;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.Id;
+import jakarta.persistence.PostLoad;
+import jakarta.persistence.PostPersist;
 import jakarta.persistence.Table;
+import jakarta.persistence.Transient;
+
+import org.springframework.data.domain.Persistable;
 
 @Entity
 @Table(name = "pricing_entries", schema = "pricing")
-public class Pricing {
+public class Pricing implements Persistable<String> {
+
+    @Transient
+    private boolean newEntity = true;
 
     @Id
     @Column(name = "serial_number", nullable = false, updatable = false, length = 64)
@@ -45,6 +53,22 @@ public class Pricing {
 
     public String getSerialNumber() {
         return serialNumber;
+    }
+
+    @Override
+    public String getId() {
+        return serialNumber;
+    }
+
+    @Override
+    public boolean isNew() {
+        return newEntity;
+    }
+
+    @PostLoad
+    @PostPersist
+    void markPersisted() {
+        newEntity = false;
     }
 
     public BigDecimal getPrice() {

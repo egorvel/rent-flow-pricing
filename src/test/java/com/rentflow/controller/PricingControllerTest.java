@@ -49,7 +49,7 @@ class PricingControllerTest {
     void configureMvc() {
         PricingController controller = new PricingController(service, new PricingConverter());
         mockMvc = MockMvcBuilders.standaloneSetup(controller)
-                .setControllerAdvice(new ApiExceptionHandler())
+                .setControllerAdvice(new ApiExceptionHandler(io.micrometer.observation.ObservationRegistry.NOOP))
                 .build();
     }
 

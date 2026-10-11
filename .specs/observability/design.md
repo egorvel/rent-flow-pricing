@@ -1,17 +1,26 @@
 # Pricing observability design
 
-Status: Proposed; this document specifies future implementation.
+Status: Implementation in progress; this document defines the accepted implementation contract.
 
 ## 1. Scope, ownership and compatibility
 
 Pricing owns the application baseline, cache/database accounting and Inventory dependency
 observations. Common owns collection, storage, Grafana views, alert provisioning and real
-Pricing-to-Inventory verification. No application or Common configuration is changed by this spec.
+Pricing-to-Inventory verification. The subsequent implementation request authorizes Pricing
+changes; Common configuration remains a separate request.
 
 Retain Java 25, Spring Boot 4.1.0, Resilience4j 2.4.0, PostgreSQL 18.4 and the existing Redis image.
 No business DTO, HTTP status, OpenAPI operation, table, migration, key format, TTL or timeout changes
 are required. PostgreSQL remains authoritative. Preserve cache-before-transaction advice for single
 hits, after-commit mutation eviction, and creation's absence of a transaction across Inventory HTTP.
+
+AC1.2's existing duplicate-create contract also applies when a competing request commits between
+the initial existence check and persistence. Verification exposed assigned-ID merge behavior that
+could overwrite the winner and return two 201 responses. Use Spring Data `Persistable<String>` with
+a transient new-entity flag cleared by JPA post-load/post-persist callbacks, so newly constructed
+Pricing entities insert and retain the existing unique-constraint-to-409 mapping. No schema or
+transaction-boundary change is needed; loaded entities retain normal update behavior. This follows
+[Spring Data's assigned-ID pattern](https://docs.spring.io/spring-data/jpa/reference/jpa/entity-persistence.html).
 
 This feature supersedes only previous telemetry descriptions: health-only exposure on the application
 listener, unexported meters and DEBUG-only cache failure logs in the older feature specs. Their

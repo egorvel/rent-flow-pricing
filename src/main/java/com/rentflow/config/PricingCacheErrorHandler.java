@@ -1,10 +1,13 @@
 package com.rentflow.config;
 
+import java.time.Duration;
 import java.util.EnumMap;
 import java.util.Map;
+import java.util.function.LongSupplier;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.cache.Cache;
 import org.springframework.cache.interceptor.CacheErrorHandler;
 import org.springframework.stereotype.Component;
@@ -22,9 +25,18 @@ public class PricingCacheErrorHandler implements CacheErrorHandler {
 
     private final Map<Operation, Counter> errorCounters;
     private final ObservationRegistry observationRegistry;
+    private final Map<Operation, LogWindow> logWindows = new EnumMap<>(Operation.class);
+    private final LongSupplier nanoTime;
 
+    @Autowired
     public PricingCacheErrorHandler(MeterRegistry meterRegistry, ObservationRegistry observationRegistry) {
+        this(meterRegistry, observationRegistry, System::nanoTime);
+    }
+
+    PricingCacheErrorHandler(
+            MeterRegistry meterRegistry, ObservationRegistry observationRegistry, LongSupplier nanoTime) {
         this.observationRegistry = observationRegistry;
+        this.nanoTime = nanoTime;
         errorCounters = new EnumMap<>(Operation.class);
         for (Operation operation : Operation.values()) {
             Counter counter = Counter.builder("pricing.cache.errors")
@@ -32,6 +44,7 @@ public class PricingCacheErrorHandler implements CacheErrorHandler {
                     .tag("operation", operation.tag)
                     .register(meterRegistry);
             errorCounters.put(operation, counter);
+            logWindows.put(operation, new LogWindow());
         }
     }
 
@@ -58,10 +71,35 @@ public class PricingCacheErrorHandler implements CacheErrorHandler {
     private void record(Operation operation, RuntimeException exception) {
         errorCounters.get(operation).increment();
         PricingCacheLookupContext.failed(observationRegistry, operation.tag, exception);
-        LOGGER.debug(
-                "Redis cache {} operation failed; continuing without cache ({})",
-                operation.tag,
-                exception.getClass().getName());
+        Long suppressed = logWindows.get(operation).next(nanoTime.getAsLong());
+        if (suppressed != null) {
+            LOGGER.atWarn()
+                    .addKeyValue("cache", "pricingBySerial")
+                    .addKeyValue("operation", operation.tag)
+                    .addKeyValue("exceptionType", exception.getClass().getName())
+                    .addKeyValue("suppressedCount", suppressed)
+                    .setCause(exception)
+                    .log("Redis cache operation failed; continuing without cache");
+        }
+    }
+
+    private static final class LogWindow {
+        private static final long INTERVAL = Duration.ofSeconds(60).toNanos();
+        private boolean emitted;
+        private long lastEmission;
+        private long suppressed;
+
+        synchronized Long next(long now) {
+            if (!emitted || now - lastEmission >= INTERVAL) {
+                long count = suppressed;
+                suppressed = 0;
+                emitted = true;
+                lastEmission = now;
+                return count;
+            }
+            suppressed++;
+            return null;
+        }
     }
 
     private enum Operation {

@@ -22,6 +22,7 @@ import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.context.request.ServletWebRequest;
 import org.springframework.web.context.request.WebRequest;
+import org.springframework.web.filter.ServerHttpObservationFilter;
 import org.springframework.web.method.annotation.HandlerMethodValidationException;
 import org.springframework.web.servlet.NoHandlerFoundException;
 import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExceptionHandler;
@@ -36,10 +37,18 @@ import com.rentflow.service.InventoryServiceUnavailableException;
 import com.rentflow.service.PricingAlreadyExistsException;
 import com.rentflow.service.PricingNotFoundException;
 
+import io.micrometer.observation.Observation;
+import io.micrometer.observation.ObservationRegistry;
 import tools.jackson.databind.exc.InvalidFormatException;
 
 @RestControllerAdvice
 public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
+
+    private final ObservationRegistry observationRegistry;
+
+    public ApiExceptionHandler(ObservationRegistry observationRegistry) {
+        this.observationRegistry = observationRegistry;
+    }
 
     private static final Comparator<ViolationResponse> VIOLATION_ORDER =
             Comparator.comparing(ViolationResponse::field).thenComparing(ViolationResponse::message);
@@ -267,11 +276,13 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
                     List.of());
             return objectResponse(problem, status, headers);
         }
+        markUnexpectedFailure(exception, request);
         return objectResponse(internalError(request), HttpStatus.INTERNAL_SERVER_ERROR, headers);
     }
 
     @ExceptionHandler(Exception.class)
     ResponseEntity<ProblemResponse> handleUnexpected(Exception exception, WebRequest request) {
+        markUnexpectedFailure(exception, request);
         HttpServletRequest servletRequest = ((ServletWebRequest) request).getRequest();
         logger.error(
                 "Unexpected failure handling "
@@ -366,6 +377,16 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
 
     private String requestPath(WebRequest request) {
         return ((ServletWebRequest) request).getRequest().getRequestURI();
+    }
+
+    private void markUnexpectedFailure(Exception exception, WebRequest request) {
+        Observation observation = observationRegistry.getCurrentObservation();
+        if (observation != null) {
+            observation.error(exception);
+        }
+        HttpServletRequest servletRequest = ((ServletWebRequest) request).getRequest();
+        ServerHttpObservationFilter.findObservationContext(servletRequest)
+                .ifPresent(context -> context.setError(exception));
     }
 
     private String parameterName(ParameterValidationResult result) {

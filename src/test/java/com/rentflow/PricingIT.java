@@ -412,6 +412,24 @@ class PricingIT extends PostgresIntegrationTest {
     }
 
     @Test
+    void rejectsCreationWhenAnotherRequestCommitsAfterTheExistenceCheck() throws Exception {
+        when(inventoryGateway.exists(CONFLICT_SERIAL)).thenAnswer(invocation -> {
+            repository.saveAndFlush(pricing(CONFLICT_SERIAL, "125.50", "1.0000", 7, "0.1000", "300.00"));
+            return true;
+        });
+
+        mockMvc.perform(post("/api/v1/pricing")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(conflictRequest("999.99")))
+                .andExpect(status().isConflict());
+
+        assertThat(repository.findAll()).singleElement().satisfies(pricing -> {
+            assertThat(pricing.getPrice()).isEqualByComparingTo("125.50");
+            assertThat(pricing.isNew()).isFalse();
+        });
+    }
+
+    @Test
     void concurrentCreateHasOneWinnerAndOneConflict() throws Exception {
         CountDownLatch ready = new CountDownLatch(2);
         CountDownLatch start = new CountDownLatch(1);

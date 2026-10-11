@@ -23,11 +23,15 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.junit.jupiter.Container;
 
 import com.rentflow.model.Pricing;
 import com.rentflow.repository.PricingRepository;
+import com.rentflow.service.InventoryGateway;
+import com.rentflow.support.EcsLogCapture;
 import com.rentflow.support.PostgresIntegrationTest;
 
 import io.micrometer.core.instrument.MeterRegistry;
@@ -55,8 +59,11 @@ class ObservabilityIT extends PostgresIntegrationTest {
         properties.add("spring.data.redis.port", () -> REDIS.getMappedPort(6379));
     }
 
-    @Autowired
+    @MockitoSpyBean
     private PricingRepository repository;
+
+    @MockitoBean
+    private InventoryGateway inventoryGateway;
 
     @Autowired
     private StringRedisTemplate redis;
@@ -231,6 +238,87 @@ class ObservabilityIT extends PostgresIntegrationTest {
             flushSpans();
             assertThat(SPANS.getFinishedSpanItems())
                     .anySatisfy(span -> assertThat(span.getName()).isEqualTo("del"));
+        }
+    }
+
+    @Test
+    void retainsFailingSqlAndCorrelatesHandledErrorsWhileKeepingPublicDetailsGeneric() throws Exception {
+        org.mockito.Mockito.doAnswer(invocation -> {
+                    jdbc.queryForObject("SELECT 'not-an-integer'::integer", Integer.class);
+                    return null;
+                })
+                .when(repository)
+                .findById("TRACE-FAILURE");
+        try (EcsLogCapture logs = new EcsLogCapture("com.rentflow")) {
+            HttpResponse<String> response = get("local.server.port", "/api/v1/pricing/TRACE-FAILURE");
+            assertThat(response.statusCode()).isEqualTo(500);
+            assertThat(response.body()).doesNotContain("not-an-integer", "SELECT");
+            flushSpans();
+            assertThat(SPANS.getFinishedSpanItems()).anySatisfy(span -> {
+                assertThat(span.getName()).contains("query");
+                assertThat(span.getStatus().getStatusCode()).isEqualTo(io.opentelemetry.api.trace.StatusCode.ERROR);
+                assertThat(span.getAttributes().toString()).contains("SELECT 'not-an-integer'::integer");
+                assertThat(span.getEvents().toString())
+                        .contains("exception.message", "exception.stacktrace", "not-an-integer");
+            });
+            assertThat(SPANS.getFinishedSpanItems()).anySatisfy(span -> {
+                assertThat(span.getKind()).isEqualTo(io.opentelemetry.api.trace.SpanKind.SERVER);
+                assertThat(span.getStatus().getStatusCode()).isEqualTo(io.opentelemetry.api.trace.StatusCode.ERROR);
+                assertThat(span.getEvents().toString()).contains("not-an-integer");
+            });
+            assertThat(logs.events()).anySatisfy(event -> {
+                assertThat(event.getLevel()).isEqualTo(ch.qos.logback.classic.Level.ERROR);
+                tools.jackson.databind.JsonNode json = EcsLogCapture.encode(event, environment);
+                assertThat(json.path("traceId").asText()).hasSize(32);
+                assertThat(json.path("spanId").asText()).hasSize(16);
+                assertThat(json.path("error").path("stack_trace").asText()).contains("not-an-integer");
+            });
+        } finally {
+            org.mockito.Mockito.reset(repository);
+        }
+    }
+
+    @Test
+    void successfulWritesAndExpectedRejectionsDoNotProduceApplicationResultLogs() throws Exception {
+        org.mockito.Mockito.when(inventoryGateway.exists("TRACE-WRITE")).thenReturn(true);
+        repository.deleteById("TRACE-WRITE");
+        String body = """
+                {"serialNumber":"TRACE-WRITE","price":124.57,"weekendRate":1,
+                 "longRentalCondition":7,"longRentalDiscount":0.1,"deposit":345.67}
+                """;
+        int port = environment.getRequiredProperty("local.server.port", Integer.class);
+        try (EcsLogCapture logs = new EcsLogCapture("com.rentflow");
+                HttpClient client = HttpClient.newHttpClient()) {
+            HttpRequest creation = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/api/v1/pricing"))
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString(body))
+                    .build();
+            assertThat(client.send(creation, HttpResponse.BodyHandlers.ofString())
+                            .statusCode())
+                    .isEqualTo(201);
+            assertThat(client.send(creation, HttpResponse.BodyHandlers.ofString())
+                            .statusCode())
+                    .isEqualTo(409);
+            HttpRequest replacement = HttpRequest.newBuilder(
+                            URI.create("http://127.0.0.1:" + port + "/api/v1/pricing/TRACE-WRITE"))
+                    .header("Content-Type", "application/json")
+                    .PUT(HttpRequest.BodyPublishers.ofString(body))
+                    .build();
+            assertThat(client.send(replacement, HttpResponse.BodyHandlers.ofString())
+                            .statusCode())
+                    .isEqualTo(200);
+            HttpRequest deletion =
+                    HttpRequest.newBuilder(replacement.uri()).DELETE().build();
+            assertThat(client.send(deletion, HttpResponse.BodyHandlers.ofString())
+                            .statusCode())
+                    .isEqualTo(204);
+            assertThat(get("local.server.port", "/api/v1/pricing/TRACE-WRITE").statusCode())
+                    .isEqualTo(404);
+            assertThat(logs.events()).isEmpty();
+            flushSpans();
+            assertThat(SPANS.getFinishedSpanItems())
+                    .allSatisfy(span -> assertThat(span.getAttributes().toString() + span.getEvents())
+                            .doesNotContain("124.57", "345.67"));
         }
     }
 

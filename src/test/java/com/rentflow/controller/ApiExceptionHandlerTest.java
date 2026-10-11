@@ -20,7 +20,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 @ExtendWith(OutputCaptureExtension.class)
 class ApiExceptionHandlerTest {
 
-    private final ApiExceptionHandler handler = new ApiExceptionHandler();
+    private final ApiExceptionHandler handler =
+            new ApiExceptionHandler(io.micrometer.observation.ObservationRegistry.NOOP);
 
     @Test
     void sanitizesUnexpectedFailuresWithoutStartingASpringContext() {
