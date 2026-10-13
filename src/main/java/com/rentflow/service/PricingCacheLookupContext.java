@@ -19,7 +19,7 @@ public final class PricingCacheLookupContext extends Observation.Context {
                 .lowCardinalityKeyValue("mode", mode)
                 .start();
         String outcome = "error";
-        try (Observation.Scope ignored = observation.openScope()) {
+        try (Observation.Scope _ = observation.openScope()) {
             T result = lookup.get();
             outcome = context.degraded ? "degraded" : context.loaded ? "miss" : "hit";
             return result;

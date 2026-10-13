@@ -11,6 +11,8 @@ import java.util.concurrent.TimeUnit;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.micrometer.metrics.test.autoconfigure.AutoConfigureMetrics;
 import org.springframework.boot.micrometer.tracing.test.autoconfigure.AutoConfigureTracing;
@@ -31,10 +33,13 @@ import org.testcontainers.junit.jupiter.Container;
 import com.rentflow.model.Pricing;
 import com.rentflow.repository.PricingRepository;
 import com.rentflow.service.InventoryGateway;
+import com.rentflow.service.PricingCacheLookupContext;
 import com.rentflow.support.EcsLogCapture;
 import com.rentflow.support.PostgresIntegrationTest;
 
 import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.observation.Observation;
+import io.micrometer.observation.ObservationRegistry;
 import io.opentelemetry.api.common.AttributeKey;
 import io.opentelemetry.sdk.testing.exporter.InMemorySpanExporter;
 import io.opentelemetry.sdk.trace.SdkTracerProvider;
@@ -42,6 +47,7 @@ import io.opentelemetry.sdk.trace.data.SpanData;
 import io.opentelemetry.sdk.trace.export.SpanExporter;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.catchThrowable;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @AutoConfigureMetrics
@@ -80,10 +86,62 @@ class ObservabilityIT extends PostgresIntegrationTest {
     @Autowired
     private SdkTracerProvider tracerProvider;
 
+    @Autowired
+    private ObservationRegistry observations;
+
     @BeforeEach
     void resetSpans() {
         flushSpans();
         SPANS.reset();
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void recordsCacheLookupErrorsOnTheChildSpanAfterRestoringTheParentScope(boolean fatal) {
+        Observation parent = Observation.start("cache.lookup.test.parent", observations);
+        Throwable failure;
+        try (Observation.Scope _ = parent.openScope()) {
+            failure = catchThrowable(() -> PricingCacheLookupContext.observe(observations, "single", () -> {
+                if (fatal) {
+                    throw new AssertionError("cache lookup failed");
+                }
+                throw new IllegalStateException("cache lookup failed");
+            }));
+            assertThat(failure).isInstanceOf(fatal ? AssertionError.class : IllegalStateException.class);
+            assertThat(observations.getCurrentObservation()).isSameAs(parent);
+            assertThat(parent.getContext().getError()).isNull();
+        } finally {
+            parent.stop();
+        }
+        assertThat(observations.getCurrentObservation()).isNull();
+        flushSpans();
+
+        List<SpanData> lookups = SPANS.getFinishedSpanItems().stream()
+                .filter(span -> span.getName().equals("pricing.cache.lookup"))
+                .toList();
+        assertThat(lookups).singleElement().satisfies(span -> {
+            assertThat(span.getStatus().getStatusCode()).isEqualTo(io.opentelemetry.api.trace.StatusCode.ERROR);
+            assertThat(span.getAttributes().get(AttributeKey.stringKey("outcome")))
+                    .isEqualTo("error");
+            assertThat(span.getEvents()).singleElement().satisfies(event -> {
+                assertThat(event.getName()).isEqualTo("exception");
+                assertThat(event.getAttributes().get(AttributeKey.stringKey("exception.type")))
+                        .isEqualTo(failure.getClass().getName());
+                assertThat(event.getAttributes().get(AttributeKey.stringKey("exception.message")))
+                        .isEqualTo("cache lookup failed");
+                assertThat(event.getAttributes().get(AttributeKey.stringKey("exception.stacktrace")))
+                        .contains("recordsCacheLookupErrorsOnTheChildSpanAfterRestoringTheParentScope");
+            });
+        });
+        assertThat(SPANS.getFinishedSpanItems().stream()
+                        .filter(span -> span.getName().equals("cache.lookup.test.parent")))
+                .singleElement()
+                .satisfies(span -> {
+                    assertThat(span.getStatus().getStatusCode()).isEqualTo(io.opentelemetry.api.trace.StatusCode.OK);
+                    assertThat(span.getEvents()).isEmpty();
+                    assertThat(lookups.getFirst().getParentSpanId()).isEqualTo(span.getSpanId());
+                    assertThat(lookups.getFirst().getTraceId()).isEqualTo(span.getTraceId());
+                });
     }
 
     @Test
@@ -266,13 +324,22 @@ class ObservabilityIT extends PostgresIntegrationTest {
                 assertThat(span.getStatus().getStatusCode()).isEqualTo(io.opentelemetry.api.trace.StatusCode.ERROR);
                 assertThat(span.getEvents().toString()).contains("not-an-integer");
             });
-            assertThat(logs.events()).anySatisfy(event -> {
-                assertThat(event.getLevel()).isEqualTo(ch.qos.logback.classic.Level.ERROR);
-                tools.jackson.databind.JsonNode json = EcsLogCapture.encode(event, environment);
-                assertThat(json.path("traceId").asText()).hasSize(32);
-                assertThat(json.path("spanId").asText()).hasSize(16);
-                assertThat(json.path("error").path("stack_trace").asText()).contains("not-an-integer");
-            });
+            assertThat(logs.events().stream()
+                            .filter(event ->
+                                    event.getLoggerName().equals("com.rentflow.controller.ApiExceptionHandler")))
+                    .singleElement()
+                    .satisfies(event -> {
+                        assertThat(event.getLevel()).isEqualTo(ch.qos.logback.classic.Level.ERROR);
+                        tools.jackson.databind.JsonNode json = EcsLogCapture.encode(event, environment);
+                        assertThat(json.path("message").asText()).isEqualTo("Unexpected failure handling request");
+                        assertThat(json.path("method").asText()).isEqualTo("GET");
+                        assertThat(json.path("route").asText()).isEqualTo("/api/v1/pricing/{serialNumber}");
+                        assertThat(json.path("path").asText()).isEqualTo("/api/v1/pricing/TRACE-FAILURE");
+                        assertThat(json.path("traceId").asText()).hasSize(32);
+                        assertThat(json.path("spanId").asText()).hasSize(16);
+                        assertThat(json.path("error").path("stack_trace").asText())
+                                .contains("not-an-integer");
+                    });
         } finally {
             org.mockito.Mockito.reset(repository);
         }
